@@ -53,9 +53,28 @@ class CodeAnalysisAgent:
             }
         }
 
+    def _get_embedding(self, text: str) -> List[float]:
+        """Obtiene embedding usando Ollama (igual que memory_manager)"""
+        try:
+            response = requests.post(
+                f"{self.ollama_url}/api/embeddings",
+                json={
+                    "model": "nomic-embed-text",
+                    "prompt": text
+                }
+            )
+            if response.status_code == 200:
+                return response.json()["embedding"]
+            else:
+                print(f"Error al obtener embedding: {response.status_code}")
+                return []
+        except Exception as e:
+            print(f"Error conectando con Ollama: {e}")
+            return []
+
     def create_weaviate_schema(self, project_name: str):
         """
-        Crea el esquema en Weaviate para el proyecto específico
+        Crea el esquema en Weaviate para el proyecto específico (vectorizer: none)
         """
         if not self.weaviate_client:
             return False
@@ -73,10 +92,11 @@ class CodeAnalysisAgent:
         except Exception as e:
             print(f"Error verificando esquema existente: {e}")
         
-        # Definir el esquema
+        # Definir el esquema (vectorizer: none)
         schema = {
             "class": class_name,
             "description": f"Análisis de código del proyecto {project_name}",
+            "vectorizer": "none",
             "properties": [
                 {
                     "name": "projectName",
@@ -198,8 +218,7 @@ class CodeAnalysisAgent:
                     "dataType": ["text[]"],
                     "description": "Tags adicionales para categorización"
                 }
-            ],
-            "vectorizer": "text2vec-transformers"
+            ]
         }
         
         try:
@@ -360,11 +379,15 @@ class CodeAnalysisAgent:
         
         class_name = f"Project_{self._sanitize_project_name(project_name)}"
         
+        # Generar embedding del contenido principal
+        embedding = self._get_embedding(content[:15000])
+        
         try:
             # Indexar el archivo principal
             self.weaviate_client.data_object.create(
                 data_object=data_object,
-                class_name=class_name
+                class_name=class_name,
+                vector=embedding
             )
             
             # Indexar chunks adicionales para análisis granular
@@ -535,6 +558,7 @@ class CodeAnalysisAgent:
                 chunk_schema = {
                     "class": class_name,
                     "description": f"Chunks detallados del proyecto {project_name}",
+                    "vectorizer": "none",
                     "properties": [
                         {"name": "parentFile", "dataType": ["text"], "description": "Archivo padre"},
                         {"name": "chunkContent", "dataType": ["text"], "description": "Contenido del chunk"},
@@ -542,8 +566,7 @@ class CodeAnalysisAgent:
                         {"name": "moduleType", "dataType": ["text"], "description": "Tipo de módulo"},
                         {"name": "technology", "dataType": ["text"], "description": "Tecnología"},
                         {"name": "projectName", "dataType": ["text"], "description": "Nombre del proyecto"}
-                    ],
-                    "vectorizer": "text2vec-transformers"
+                    ]
                 }
                 self.weaviate_client.schema.create_class(chunk_schema)
         except:
@@ -560,11 +583,12 @@ class CodeAnalysisAgent:
                     "technology": technology,
                     "projectName": project_name
                 }
-                
+                embedding = self._get_embedding(chunk[:5000])
                 try:
                     self.weaviate_client.data_object.create(
                         data_object=chunk_data,
-                        class_name=class_name
+                        class_name=class_name,
+                        vector=embedding
                     )
                 except:
                     pass  # Continuar si hay error en chunks adicionales
@@ -804,6 +828,7 @@ Responde en español y máximo 300 palabras.
         
         try:
             # Consulta principal
+            query_embedding = self._get_embedding(query)
             result = (
                 self.weaviate_client.query
                 .get(class_name, [
@@ -812,7 +837,7 @@ Responde en español y máximo 300 palabras.
                     "endpoints", "styles", "events", "variables", "comments",
                     "relatedFiles", "contentChunks", "complexity", "tags", "content"
                 ])
-                .with_near_text({"concepts": [query]})
+                .with_near_vector({"vector": query_embedding})
                 .with_limit(limit)
                 .do()
             )
@@ -830,7 +855,7 @@ Responde en español y máximo 300 palabras.
                         "parentFile", "chunkContent", "chunkType", 
                         "moduleType", "technology"
                     ])
-                    .with_near_text({"concepts": [query]})
+                    .with_near_vector({"vector": query_embedding})
                     .with_limit(15)
                     .do()
                 )
