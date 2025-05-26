@@ -7,8 +7,9 @@ from pathlib import Path
 import re
 import hashlib
 import weaviate
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
+import time
 
 class CodeAnalysisAgent:
     """
@@ -240,51 +241,112 @@ class CodeAnalysisAgent:
             sanitized = f"Proj_{sanitized}"
         return sanitized or "UnknownProject"
 
+    def _log(self, message: str):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+    def _should_index_file(self, file_path: str, relative_path: str, content: str) -> bool:
+        """
+        Decide si un archivo es relevante para indexar usando heurísticas inteligentes.
+        """
+        # Extensiones irrelevantes
+        ignored_exts = [
+            '.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.bmp', '.tiff', '.webp',
+            '.exe', '.dll', '.so', '.bin', '.obj', '.class', '.pyc', '.pyo', '.zip', '.tar', '.gz', '.rar', '.7z',
+            '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.mp3', '.mp4', '.avi', '.mov', '.mkv',
+            '.log', '.tmp', '.bak', '.swp', '.lock', '.db', '.sqlite', '.woff', '.woff2', '.eot', '.ttf', '.otf',
+            '.DS_Store', '.plist', '.sublime-workspace', '.sublime-project', '.iml', '.idea', '.vs', '.vscode', '.env', '.sample', '.test', '.spec'
+        ]
+        ext = Path(file_path).suffix.lower()
+        if ext in ignored_exts:
+            self._log(f"[IGNORADO] Extensión irrelevante: {relative_path}")
+            return False
+        # Archivos ocultos o de sistema
+        if os.path.basename(file_path).startswith('.'):
+            self._log(f"[IGNORADO] Archivo oculto: {relative_path}")
+            return False
+        # Archivos muy pequeños o vacíos
+        if len(content.strip()) < 5:
+            self._log(f"[IGNORADO] Archivo vacío o muy pequeño: {relative_path}")
+            return False
+        # Archivos binarios (contienen bytes no imprimibles)
+        if '\x00' in content or not all(32 <= ord(c) <= 126 or c in '\n\r\t' for c in content[:100]):
+            self._log(f"[IGNORADO] Archivo binario o no texto: {relative_path}")
+            return False
+        # Archivos de backup o temporales
+        if any(s in file_path.lower() for s in ['backup', 'bak', 'temp', 'tmp', '~', '#']):
+            self._log(f"[IGNORADO] Archivo temporal o backup: {relative_path}")
+            return False
+        # Carpetas irrelevantes en la ruta
+        ignored_dirs = ['node_modules', 'bower_components', '.git', 'dist', 'build', 'coverage', 'nbproject', '.idea', '.vscode', '__pycache__']
+        if any(f"{os.sep}{d}{os.sep}" in file_path for d in ignored_dirs):
+            self._log(f"[IGNORADO] Carpeta irrelevante en ruta: {relative_path}")
+            return False
+        # Si no contiene palabras clave de código fuente
+        code_keywords = ['function', 'class', 'import', 'export', 'def ', 'var ', 'let ', 'const ', 'public ', 'private ', 'return', 'if ', 'else', 'for ', 'while ', '=>', 'template', 'script', 'style']
+        if not any(kw in content for kw in code_keywords):
+            self._log(f"[IGNORADO] No parece código fuente: {relative_path}")
+            return False
+        return True
+
     def analyze_and_index_project(self, project_path: str, project_name: str = None) -> Dict:
-        """
-        Analiza un proyecto completo y lo indexa en Weaviate
-        """
         if project_name is None:
             project_name = os.path.basename(project_path)
-        
-        print(f"🚀 Iniciando análisis e indexación del proyecto: {project_name}")
-        print(f"📁 Ruta: {project_path}")
-        
-        # Crear esquema en Weaviate
+        self._log(f"🚀 Iniciando análisis e indexación del proyecto: {project_name}")
+        self._log(f"📁 Ruta: {project_path}")
         if not self.create_weaviate_schema(project_name):
             return {"error": "No se pudo crear el esquema en Weaviate"}
-        
-        # Analizar estructura general
         project_analysis = self.analyze_project_structure(project_path)
         project_analysis["project_name"] = project_name
-        project_analysis["analysis_date"] = datetime.now().isoformat()
-        
-        # Indexar archivos individuales
+        project_analysis["analysis_date"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
         indexed_files = 0
         errors = []
-        
+        start_time = time.time()
+        file_times = []
+        ignore_dirs = ['node_modules', 'bower_components', '.git', 'dist', 'build', 'coverage', 'nbproject']
+        all_files = []
         for root, dirs, files in os.walk(project_path):
-            # Ignorar directorios innecesarios
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['node_modules', 'dist', 'build', 'coverage']]
-            
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ignore_dirs]
             for file in files:
-                if file.startswith('.') or file.endswith(('.png', '.jpg', '.jpeg', '.gif', '.ico', '.svg')):
+                if file.startswith('.'):
                     continue
-                
                 file_path = os.path.join(root, file)
-                relative_path = os.path.relpath(file_path, project_path)
-                
-                try:
-                    if self._index_file(file_path, relative_path, project_name, project_analysis):
-                        indexed_files += 1
-                        if indexed_files % 10 == 0:
-                            print(f"📄 Indexados {indexed_files} archivos...")
-                except Exception as e:
-                    errors.append(f"Error indexando {relative_path}: {e}")
-        
-        # Generar resumen general del proyecto
+                all_files.append((file_path, os.path.relpath(file_path, project_path)))
+        total_files = len(all_files)
+        for idx, (file_path, relative_path) in enumerate(all_files, 1):
+            t0 = time.time()
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except:
+                self._log(f"⚠️  No se pudo leer: {relative_path}")
+                continue
+            if not self._should_index_file(file_path, relative_path, content):
+                continue
+            self._log(f"🔍 Analizando archivo: {relative_path} ({idx}/{total_files})")
+            try:
+                ok = self._index_file(file_path, relative_path, project_name, project_analysis)
+                if ok:
+                    indexed_files += 1
+                    self._log(f"✅ Indexado: {relative_path}")
+                else:
+                    self._log(f"⚠️  Archivo ignorado o vacío: {relative_path}")
+            except Exception as e:
+                error_msg = f"❌ Error en: {relative_path} - {e}"
+                self._log(error_msg)
+                errors.append(error_msg)
+            t1 = time.time()
+            file_times.append(t1 - t0)
+            avg_time = sum(file_times) / len(file_times)
+            remaining = total_files - idx
+            est_seconds = int(avg_time * remaining)
+            est_min, est_sec = divmod(est_seconds, 60)
+            self._log(f"⏳ Tiempo estimado restante: {est_min}m {est_sec}s")
+        total_time = int(time.time() - start_time)
+        min_total, sec_total = divmod(total_time, 60)
+        self._log(f"🏁 Análisis completado en {min_total}m {sec_total}s. Archivos indexados: {indexed_files}/{total_files}")
+        if errors:
+            self._log(f"❗ Errores encontrados: {len(errors)}")
         project_summary = self._generate_project_summary(project_analysis)
-        
         result = {
             "project_name": project_name,
             "project_path": project_path,
@@ -296,60 +358,57 @@ class CodeAnalysisAgent:
             "errors": errors,
             "analysis_date": project_analysis["analysis_date"]
         }
-        
-        print(f"✅ Análisis completado:")
-        print(f"   📊 {indexed_files} archivos indexados de {project_analysis['total_files']} totales")
-        print(f"   🔧 Tecnologías: {', '.join(project_analysis['technologies_detected'])}")
-        print(f"   🏗️  Patrones: {', '.join(project_analysis['architecture_patterns'])}")
-        
         return result
 
+    def _clean_list_field(self, field, field_name):
+        cleaned = []
+        for i, v in enumerate(field):
+            try:
+                s = str(v)
+                if s and len(s) < 500:
+                    cleaned.append(s)
+                elif len(s) >= 500:
+                    self._log(f"[WARN] Valor muy largo en '{field_name}' (ignorado): {s[:60]}...")
+            except Exception as e:
+                self._log(f"[WARN] Valor no convertible a string en '{field_name}' (ignorado): {v} - {e}")
+        return cleaned
+
     def _index_file(self, file_path: str, relative_path: str, project_name: str, project_context: Dict) -> bool:
-        """
-        Indexa un archivo individual en Weaviate con contexto completo
-        """
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
         except:
             return False
-        
         if len(content.strip()) == 0:
             return False
-        
-        # Análisis del archivo
         file_analysis = self.analyze_file_complexity(file_path)
         file_ext = Path(file_path).suffix.lower()
-        
-        # Extraer información específica del archivo
         imports = self._extract_imports(content, file_ext)
         exports = self._extract_exports(content, file_ext)
         functions = self._extract_functions(content, file_ext)
         classes = self._extract_classes(content, file_ext)
         endpoints = self._extract_endpoints(content)
         styles = self._extract_styles(content, file_ext)
-        
-        # Extraer más contexto específico
         events = self._extract_events(content, file_ext)
         variables = self._extract_variables(content, file_ext)
         comments = self._extract_comments(content, file_ext)
-        
-        # Generar resumen del archivo
         summary = self._generate_file_summary(content, file_analysis, relative_path)
-        
-        # Determinar tipo de módulo
         module_type = self._determine_module_type(relative_path, content, file_analysis)
-        
-        # Determinar tecnología principal
         technology = self._determine_file_technology(content, file_ext, project_context)
-        
-        # Crear chunks de contenido para análisis más granular
         content_chunks = self._create_content_chunks(content, file_path)
-        
-        # Detectar relaciones con otros archivos
         related_files = self._find_related_files(content, imports, exports)
-        
-        # Crear objeto principal para Weaviate
+        embedding = self._get_embedding(content[:15000])
+        # Limpiar todos los campos tipo lista
+        imports = self._clean_list_field(imports, 'imports')
+        exports = self._clean_list_field(exports, 'exports')
+        functions = self._clean_list_field(functions, 'functions')
+        classes = self._clean_list_field(classes, 'classes')
+        endpoints = self._clean_list_field(endpoints, 'endpoints')
+        styles = self._clean_list_field(styles, 'styles')
+        events = self._clean_list_field(events, 'events')
+        variables = self._clean_list_field(variables, 'variables')
+        comments = self._clean_list_field(comments, 'comments')
+        related_files = self._clean_list_field(related_files, 'relatedFiles')
         data_object = {
             "projectName": project_name,
             "filePath": relative_path,
@@ -357,7 +416,7 @@ class CodeAnalysisAgent:
             "fileType": file_ext,
             "moduleType": module_type,
             "technology": technology,
-            "content": content[:15000],  # Aumentado para más contexto
+            "content": content[:15000],
             "summary": summary,
             "dependencies": imports,
             "exports": exports,
@@ -372,27 +431,18 @@ class CodeAnalysisAgent:
             "relatedFiles": related_files,
             "complexity": file_analysis.get("migration_difficulty", "unknown"),
             "linesOfCode": file_analysis.get("lines_of_code", 0),
-            "analysisDate": datetime.now().isoformat(),
+            "analysisDate": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
             "tags": self._generate_tags(relative_path, file_analysis, module_type),
-            "contentChunks": content_chunks[:5]  # Primeros 5 chunks más importantes
+            "contentChunks": content_chunks[:5]
         }
-        
         class_name = f"Project_{self._sanitize_project_name(project_name)}"
-        
-        # Generar embedding del contenido principal
-        embedding = self._get_embedding(content[:15000])
-        
         try:
-            # Indexar el archivo principal
             self.weaviate_client.data_object.create(
                 data_object=data_object,
                 class_name=class_name,
                 vector=embedding
             )
-            
-            # Indexar chunks adicionales para análisis granular
             self._index_file_chunks(content_chunks[5:], relative_path, project_name, module_type, technology)
-            
             return True
         except Exception as e:
             print(f"Error indexando {relative_path}: {e}")

@@ -38,6 +38,18 @@ def cmd_analizar(args):
         print(f"❌ Error: La ruta {project_path} no existe")
         return
     
+    # Confirmación si ya existe el proyecto en Weaviate
+    try:
+        existing_classes = [cls['class'] for cls in agent.weaviate_client.schema.get().get('classes', [])]
+        class_name = f"Project_{project_name}" if project_name.startswith("_") else f"Project_{project_name}"
+        if class_name in existing_classes:
+            response = input(f"⚠️ Ya existe un proyecto llamado '{project_name}'. ¿Quieres sobreescribirlo? (s/N): ")
+            if response.strip().lower() not in ['s', 'sí', 'si', 'y', 'yes']:
+                print("❌ Operación cancelada. No se modificó el proyecto.")
+                return
+    except Exception as e:
+        print(f"⚠️ No se pudo verificar la existencia previa del proyecto: {e}")
+    
     result = agent.analyze_and_index_project(project_path, project_name)
     
     if "error" in result:
