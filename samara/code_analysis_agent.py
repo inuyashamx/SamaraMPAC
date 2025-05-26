@@ -10,6 +10,8 @@ import weaviate
 from datetime import datetime, timezone
 import uuid
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class CodeAnalysisAgent:
     """
@@ -27,6 +29,12 @@ class CodeAnalysisAgent:
             "not_indexed": None,
             "enabled": False
         }
+        
+        # Threading y sincronización
+        self._log_lock = threading.Lock()
+        self._counter_lock = threading.Lock()
+        self._ollama_semaphore = threading.Semaphore(2)  # Max 2 llamadas simultáneas a Ollama
+        self._indexed_files_count = 0
         
         # Conectar a Weaviate
         try:
@@ -61,23 +69,25 @@ class CodeAnalysisAgent:
         }
 
     def _get_embedding(self, text: str) -> List[float]:
-        """Obtiene embedding usando Ollama (igual que memory_manager)"""
-        try:
-            response = requests.post(
-                f"{self.ollama_url}/api/embeddings",
-                json={
-                    "model": "nomic-embed-text",
-                    "prompt": text
-                }
-            )
-            if response.status_code == 200:
-                return response.json()["embedding"]
-            else:
-                print(f"Error al obtener embedding: {response.status_code}")
+        """Obtiene embedding usando Ollama con rate limiting"""
+        with self._ollama_semaphore:  # Limitar llamadas simultáneas
+            try:
+                response = requests.post(
+                    f"{self.ollama_url}/api/embeddings",
+                    json={
+                        "model": "nomic-embed-text",
+                        "prompt": text
+                    },
+                    timeout=30  # Timeout de 30 segundos
+                )
+                if response.status_code == 200:
+                    return response.json()["embedding"]
+                else:
+                    print(f"Error al obtener embedding: {response.status_code}")
+                    return []
+            except Exception as e:
+                print(f"Error conectando con Ollama: {e}")
                 return []
-        except Exception as e:
-            print(f"Error conectando con Ollama: {e}")
-            return []
 
     def create_weaviate_schema(self, project_name: str):
         """
@@ -249,7 +259,7 @@ class CodeAnalysisAgent:
 
     def _log(self, message: str, force: bool = False):
         """
-        Log con soporte para verbose mode
+        Log thread-safe con soporte para verbose mode
         force=True siempre muestra el mensaje
         force=False solo muestra si verbose_mode=True o si es un mensaje importante
         """
@@ -259,7 +269,8 @@ class CodeAnalysisAgent:
         
         # Mostrar si es importante o si está en modo verbose
         if is_important or self._verbose_mode:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+            with self._log_lock:  # Thread-safe logging
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
 
     def _setup_log_files(self, base_path: str, project_name: str, clear_existing: bool = False):
         """
@@ -321,7 +332,7 @@ FORMATO: [TIMESTAMP] RAZÓN: ruta_del_archivo
 
     def _log_to_file(self, log_type: str, message: str):
         """
-        Escribe un mensaje al archivo de log correspondiente
+        Escribe un mensaje al archivo de log correspondiente (thread-safe)
         log_type: 'ignored' o 'not_indexed'
         """
         if not self._log_files["enabled"] or log_type not in self._log_files:
@@ -329,9 +340,10 @@ FORMATO: [TIMESTAMP] RAZÓN: ruta_del_archivo
         
         file_handle = self._log_files[log_type]
         if file_handle:
-            timestamp = datetime.now().strftime('%H:%M:%S')
-            file_handle.write(f"[{timestamp}] {message}\n")
-            file_handle.flush()
+            with self._log_lock:  # Thread-safe file writing
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                file_handle.write(f"[{timestamp}] {message}\n")
+                file_handle.flush()
 
     def __del__(self):
         """
@@ -494,6 +506,63 @@ Para revisar este archivo:
             return False
         return True
 
+    def _process_file_thread_safe(self, file_data: tuple, project_name: str, project_analysis: Dict, file_index: int, total_files: int) -> Dict:
+        """
+        Procesa un archivo en un thread separado de forma segura
+        """
+        file_path, relative_path = file_data
+        result = {
+            "success": False,
+            "indexed": False,
+            "error": None,
+            "file_path": relative_path
+        }
+        
+        try:
+            # Leer archivo
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    content = f.read()
+            except Exception as e:
+                reason = f"Error leyendo archivo: {relative_path} - {e}"
+                self._log(f"⚠️  No se pudo leer: {relative_path}")
+                self._log_to_file("not_indexed", reason)
+                result["error"] = reason
+                return result
+            
+            # Verificar si debe indexar
+            if not self._should_index_file(file_path, relative_path, content):
+                result["success"] = True
+                return result
+            
+            self._log(f"🔍 Analizando archivo: {relative_path} ({file_index}/{total_files})")
+            
+            # Indexar archivo
+            ok = self._index_file(file_path, relative_path, project_name, project_analysis)
+            
+            if ok:
+                with self._counter_lock:
+                    self._indexed_files_count += 1
+                    indexed_count = self._indexed_files_count
+                
+                self._log(f"✅ Indexado: {relative_path}")
+                result["success"] = True
+                result["indexed"] = True
+            else:
+                reason = f"Archivo vacío o sin contenido relevante: {relative_path}"
+                self._log(f"⚠️  Archivo ignorado o vacío: {relative_path}")
+                self._log_to_file("not_indexed", reason)
+                result["error"] = reason
+                
+        except Exception as e:
+            error_msg = f"❌ Error en: {relative_path} - {e}"
+            reason = f"Error durante indexación: {relative_path} - {e}"
+            self._log(error_msg)
+            self._log_to_file("not_indexed", reason)
+            result["error"] = reason
+        
+        return result
+
     def analyze_and_index_project(self, project_path: str, project_name: str = None, force_schema: bool = True) -> Dict:
         if project_name is None:
             project_name = os.path.basename(project_path)
@@ -505,12 +574,17 @@ Para revisar este archivo:
         project_analysis = self.analyze_project_structure(project_path)
         project_analysis["project_name"] = project_name
         project_analysis["analysis_date"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
-        indexed_files = 0
+        
+        # Resetear contador
+        with self._counter_lock:
+            self._indexed_files_count = 0
+        
         errors = []
         start_time = time.time()
-        file_times = []
         ignore_dirs = ['node_modules', 'bower_components', '.git', 'dist', 'build', 'coverage', 'nbproject']
         all_files = []
+        
+        # Recopilar todos los archivos
         for root, dirs, files in os.walk(project_path):
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ignore_dirs]
             for file in files:
@@ -520,42 +594,72 @@ Para revisar este archivo:
                 # Normalizar rutas para usar siempre '/' como separador
                 relative_path = os.path.relpath(file_path, project_path).replace('\\', '/')
                 all_files.append((file_path, relative_path))
+        
         total_files = len(all_files)
-        for idx, (file_path, relative_path) in enumerate(all_files, 1):
-            t0 = time.time()
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-            except Exception as e:
-                reason = f"Error leyendo archivo: {relative_path} - {e}"
-                self._log(f"⚠️  No se pudo leer: {relative_path}")
-                self._log_to_file("not_indexed", reason)
-                continue
-            if not self._should_index_file(file_path, relative_path, content):
-                continue
-            self._log(f"🔍 Analizando archivo: {relative_path} ({idx}/{total_files})")
-            try:
-                ok = self._index_file(file_path, relative_path, project_name, project_analysis)
-                if ok:
-                    indexed_files += 1
-                    self._log(f"✅ Indexado: {relative_path}")
-                else:
-                    reason = f"Archivo vacío o sin contenido relevante: {relative_path}"
-                    self._log(f"⚠️  Archivo ignorado o vacío: {relative_path}")
-                    self._log_to_file("not_indexed", reason)
-            except Exception as e:
-                error_msg = f"❌ Error en: {relative_path} - {e}"
-                reason = f"Error durante indexación: {relative_path} - {e}"
-                self._log(error_msg)
-                self._log_to_file("not_indexed", reason)
-                errors.append(error_msg)
-            t1 = time.time()
-            file_times.append(t1 - t0)
-            avg_time = sum(file_times) / len(file_times)
-            remaining = total_files - idx
-            est_seconds = int(avg_time * remaining)
-            est_min, est_sec = divmod(est_seconds, 60)
-            self._log(f"⏳ Tiempo estimado restante: {est_min}m {est_sec}s")
+        self._log(f"📁 Total de archivos encontrados: {total_files}", force=True)
+        
+        # Configurar paralelización
+        max_workers = min(16, os.cpu_count())  # Máximo 16 workers, o el total de CPUs
+        self._log(f"🚀 Procesando con {max_workers} threads paralelos", force=True)
+        
+        completed_files = 0
+        last_progress_time = time.time()
+        
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Enviar tareas al pool
+                future_to_file = {
+                    executor.submit(
+                        self._process_file_thread_safe, 
+                        file_data, 
+                        project_name, 
+                        project_analysis, 
+                        idx, 
+                        total_files
+                    ): (idx, file_data) for idx, file_data in enumerate(all_files, 1)
+                }
+                
+                # Procesar resultados conforme se completan
+                for future in as_completed(future_to_file):
+                    idx, file_data = future_to_file[future]
+                    completed_files += 1
+                    
+                    try:
+                        result = future.result(timeout=60)  # 60 segundos timeout por archivo
+                        
+                        if result["error"]:
+                            errors.append(result["error"])
+                            
+                    except Exception as e:
+                        error_msg = f"❌ Error procesando {file_data[1]}: {e}"
+                        self._log(error_msg)
+                        errors.append(error_msg)
+                    
+                    # Mostrar progreso cada 10 archivos o cada 30 segundos
+                    current_time = time.time()
+                    if completed_files % 10 == 0 or (current_time - last_progress_time) > 30:
+                        elapsed = current_time - start_time
+                        if completed_files > 0:
+                            avg_time = elapsed / completed_files
+                            remaining = total_files - completed_files
+                            est_seconds = int(avg_time * remaining)
+                            est_min, est_sec = divmod(est_seconds, 60)
+                            
+                            with self._counter_lock:
+                                indexed_count = self._indexed_files_count
+                            
+                            self._log(f"⏳ Progreso: {completed_files}/{total_files} procesados, {indexed_count} indexados. Tiempo estimado: {est_min}m {est_sec}s", force=True)
+                        last_progress_time = current_time
+                        
+        except KeyboardInterrupt:
+            self._log("⏹️  Interrupción del usuario. Cerrando threads...", force=True)
+            executor.shutdown(wait=False)
+            raise
+        
+        # Obtener resultado final
+        with self._counter_lock:
+            indexed_files = self._indexed_files_count
+            
         total_time = int(time.time() - start_time)
         min_total, sec_total = divmod(total_time, 60)
         self._log(f"🏁 Análisis completado en {min_total}m {sec_total}s. Archivos indexados: {indexed_files}/{total_files}", force=True)
