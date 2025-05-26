@@ -21,6 +21,12 @@ class CodeAnalysisAgent:
     def __init__(self, ollama_url: str = "http://localhost:11434", weaviate_url: str = "http://localhost:8080"):
         self.ollama_url = ollama_url
         self.weaviate_url = weaviate_url
+        self._verbose_mode = False  # Para logging detallado cuando se usa --verbose
+        self._log_files = {
+            "ignored": None,
+            "not_indexed": None,
+            "enabled": False
+        }
         
         # Conectar a Weaviate
         try:
@@ -241,8 +247,194 @@ class CodeAnalysisAgent:
             sanitized = f"Proj_{sanitized}"
         return sanitized or "UnknownProject"
 
-    def _log(self, message: str):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+    def _log(self, message: str, force: bool = False):
+        """
+        Log con soporte para verbose mode
+        force=True siempre muestra el mensaje
+        force=False solo muestra si verbose_mode=True o si es un mensaje importante
+        """
+        # Mensajes importantes que siempre se muestran
+        important_prefixes = ['🚀', '✅', '❌', '📊', '🏁', '💾', '📦']
+        is_important = force or any(message.startswith(prefix) for prefix in important_prefixes)
+        
+        # Mostrar si es importante o si está en modo verbose
+        if is_important or self._verbose_mode:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+    def _setup_log_files(self, base_path: str, project_name: str, clear_existing: bool = False):
+        """
+        Configura los archivos de log separados para ignorados y no indexados
+        """
+        from pathlib import Path
+        import os
+        import glob
+        
+        # Crear el directorio base si no existe
+        log_dir = Path(base_path)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Borrar archivos anteriores si se especifica
+        if clear_existing:
+            self._clear_existing_logs(log_dir, project_name)
+        
+        # Crear nombres de archivo con timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        project_safe = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
+        
+        ignored_file = log_dir / f"{project_safe}_ignored_{timestamp}.log"
+        not_indexed_file = log_dir / f"{project_safe}_not_indexed_{timestamp}.log"
+        
+        try:
+            self._log_files["ignored"] = open(ignored_file, 'w', encoding='utf-8')
+            self._log_files["not_indexed"] = open(not_indexed_file, 'w', encoding='utf-8')
+            self._log_files["enabled"] = True
+            
+            # Escribir headers
+            self._write_log_header(self._log_files["ignored"], "ARCHIVOS IGNORADOS", project_name)
+            self._write_log_header(self._log_files["not_indexed"], "ARCHIVOS NO INDEXADOS", project_name)
+            
+            self._log(f"📝 Archivos de log configurados:", force=True)
+            self._log(f"   🚫 Ignorados: {ignored_file}", force=True)
+            self._log(f"   ❌ No indexados: {not_indexed_file}", force=True)
+            
+        except Exception as e:
+            self._log(f"⚠️ Error configurando archivos de log: {e}", force=True)
+            self._log_files["enabled"] = False
+
+    def _write_log_header(self, file_handle, log_type: str, project_name: str):
+        """
+        Escribe el header del archivo de log
+        """
+        header = f"""
+{'='*60}
+{log_type} - PROYECTO: {project_name}
+{'='*60}
+Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Descripción: {log_type.lower()} durante el análisis del proyecto
+
+FORMATO: [TIMESTAMP] RAZÓN: ruta_del_archivo
+{'='*60}
+
+"""
+        file_handle.write(header)
+        file_handle.flush()
+
+    def _log_to_file(self, log_type: str, message: str):
+        """
+        Escribe un mensaje al archivo de log correspondiente
+        log_type: 'ignored' o 'not_indexed'
+        """
+        if not self._log_files["enabled"] or log_type not in self._log_files:
+            return
+        
+        file_handle = self._log_files[log_type]
+        if file_handle:
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            file_handle.write(f"[{timestamp}] {message}\n")
+            file_handle.flush()
+
+    def __del__(self):
+        """
+        Cerrar archivos de log al destruir el objeto
+        """
+        if hasattr(self, '_log_files') and self._log_files["enabled"]:
+            for file_handle in [self._log_files["ignored"], self._log_files["not_indexed"]]:
+                if file_handle:
+                    try:
+                        file_handle.close()
+                    except:
+                        pass
+
+    def _clear_existing_logs(self, log_dir: Path, project_name: str):
+        """
+        Borra los archivos de log anteriores del proyecto
+        """
+        import glob
+        
+        project_safe = re.sub(r'[^a-zA-Z0-9_]', '_', project_name)
+        
+        # Patrones para buscar archivos del proyecto
+        patterns = [
+            f"{project_safe}_ignored_*.log",
+            f"{project_safe}_not_indexed_*.log"
+        ]
+        
+        deleted_count = 0
+        for pattern in patterns:
+            full_pattern = log_dir / pattern
+            for file_path in glob.glob(str(full_pattern)):
+                try:
+                    os.remove(file_path)
+                    deleted_count += 1
+                    self._log(f"🗑️  Eliminado log anterior: {os.path.basename(file_path)}")
+                except Exception as e:
+                    self._log(f"⚠️ No se pudo eliminar {file_path}: {e}")
+        
+        if deleted_count > 0:
+            self._log(f"🧹 Eliminados {deleted_count} archivos de log anteriores", force=True)
+        else:
+            self._log(f"📝 No hay logs anteriores para eliminar", force=True)
+
+    def _finalize_log_files(self):
+        """
+        Finaliza los archivos de log y muestra un resumen
+        """
+        if not self._log_files["enabled"]:
+            return
+        
+        # Contar líneas en cada archivo
+        ignored_count = 0
+        not_indexed_count = 0
+        
+        # Escribir footer y contar líneas
+        for log_type in ["ignored", "not_indexed"]:
+            if self._log_files[log_type]:
+                # Escribir footer
+                footer = f"""
+{'='*60}
+RESUMEN FINAL
+{'='*60}
+Análisis completado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+Para revisar este archivo:
+- Busca patrones específicos de archivos que no esperabas ver aquí
+- Verifica que los filtros estén funcionando correctamente
+- Considera ajustar los criterios de filtrado si es necesario
+
+{'='*60}
+"""
+                self._log_files[log_type].write(footer)
+                self._log_files[log_type].close()
+                
+                # Contar líneas (aproximado)
+                try:
+                    if log_type == "ignored":
+                        ignored_count = self._count_log_entries(self._log_files[log_type].name)
+                    else:
+                        not_indexed_count = self._count_log_entries(self._log_files[log_type].name)
+                except:
+                    pass
+        
+        # Mostrar resumen
+        self._log(f"📝 Archivos de log finalizados:", force=True)
+        self._log(f"   🚫 {ignored_count} archivos ignorados registrados", force=True)
+        self._log(f"   ❌ {not_indexed_count} archivos no indexados registrados", force=True)
+        
+        self._log_files["enabled"] = False
+
+    def _count_log_entries(self, file_path: str) -> int:
+        """
+        Cuenta las entradas de log (líneas que empiezan con [timestamp])
+        """
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                count = 0
+                for line in f:
+                    if line.strip().startswith('[') and ']' in line:
+                        count += 1
+                return count
+        except:
+            return 0
 
     def _should_index_file(self, file_path: str, relative_path: str, content: str) -> bool:
         """
@@ -258,41 +450,55 @@ class CodeAnalysisAgent:
         ]
         ext = Path(file_path).suffix.lower()
         if ext in ignored_exts:
-            self._log(f"[IGNORADO] Extensión irrelevante: {relative_path}")
+            reason = f"Extensión irrelevante ({ext}): {relative_path}"
+            self._log(f"[IGNORADO] {reason}")
+            self._log_to_file("ignored", reason)
             return False
         # Archivos ocultos o de sistema
         if os.path.basename(file_path).startswith('.'):
-            self._log(f"[IGNORADO] Archivo oculto: {relative_path}")
+            reason = f"Archivo oculto: {relative_path}"
+            self._log(f"[IGNORADO] {reason}")
+            self._log_to_file("ignored", reason)
             return False
         # Archivos muy pequeños o vacíos
         if len(content.strip()) < 5:
-            self._log(f"[IGNORADO] Archivo vacío o muy pequeño: {relative_path}")
+            reason = f"Archivo vacío o muy pequeño ({len(content)} bytes): {relative_path}"
+            self._log(f"[IGNORADO] {reason}")
+            self._log_to_file("ignored", reason)
             return False
         # Archivos binarios (contienen bytes no imprimibles)
         if '\x00' in content or not all(32 <= ord(c) <= 126 or c in '\n\r\t' for c in content[:100]):
-            self._log(f"[IGNORADO] Archivo binario o no texto: {relative_path}")
+            reason = f"Archivo binario o no texto: {relative_path}"
+            self._log(f"[IGNORADO] {reason}")
+            self._log_to_file("ignored", reason)
             return False
         # Archivos de backup o temporales
         if any(s in file_path.lower() for s in ['backup', 'bak', 'temp', 'tmp', '~', '#']):
-            self._log(f"[IGNORADO] Archivo temporal o backup: {relative_path}")
+            reason = f"Archivo temporal o backup: {relative_path}"
+            self._log(f"[IGNORADO] {reason}")
+            self._log_to_file("ignored", reason)
             return False
         # Carpetas irrelevantes en la ruta
         ignored_dirs = ['node_modules', 'bower_components', '.git', 'dist', 'build', 'coverage', 'nbproject', '.idea', '.vscode', '__pycache__']
         if any(f"{os.sep}{d}{os.sep}" in file_path for d in ignored_dirs):
-            self._log(f"[IGNORADO] Carpeta irrelevante en ruta: {relative_path}")
+            reason = f"Carpeta irrelevante en ruta: {relative_path}"
+            self._log(f"[IGNORADO] {reason}")
+            self._log_to_file("ignored", reason)
             return False
         # Si no contiene palabras clave de código fuente
         code_keywords = ['function', 'class', 'import', 'export', 'def ', 'var ', 'let ', 'const ', 'public ', 'private ', 'return', 'if ', 'else', 'for ', 'while ', '=>', 'template', 'script', 'style']
         if not any(kw in content for kw in code_keywords):
-            self._log(f"[IGNORADO] No parece código fuente: {relative_path}")
+            reason = f"No parece código fuente: {relative_path}"
+            self._log(f"[IGNORADO] {reason}")
+            self._log_to_file("ignored", reason)
             return False
         return True
 
     def analyze_and_index_project(self, project_path: str, project_name: str = None) -> Dict:
         if project_name is None:
             project_name = os.path.basename(project_path)
-        self._log(f"🚀 Iniciando análisis e indexación del proyecto: {project_name}")
-        self._log(f"📁 Ruta: {project_path}")
+        self._log(f"🚀 Iniciando análisis e indexación del proyecto: {project_name}", force=True)
+        self._log(f"📁 Ruta: {project_path}", force=True)
         if not self.create_weaviate_schema(project_name):
             return {"error": "No se pudo crear el esquema en Weaviate"}
         project_analysis = self.analyze_project_structure(project_path)
@@ -317,8 +523,10 @@ class CodeAnalysisAgent:
             try:
                 with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                     content = f.read()
-            except:
+            except Exception as e:
+                reason = f"Error leyendo archivo: {relative_path} - {e}"
                 self._log(f"⚠️  No se pudo leer: {relative_path}")
+                self._log_to_file("not_indexed", reason)
                 continue
             if not self._should_index_file(file_path, relative_path, content):
                 continue
@@ -329,10 +537,14 @@ class CodeAnalysisAgent:
                     indexed_files += 1
                     self._log(f"✅ Indexado: {relative_path}")
                 else:
+                    reason = f"Archivo vacío o sin contenido relevante: {relative_path}"
                     self._log(f"⚠️  Archivo ignorado o vacío: {relative_path}")
+                    self._log_to_file("not_indexed", reason)
             except Exception as e:
                 error_msg = f"❌ Error en: {relative_path} - {e}"
+                reason = f"Error durante indexación: {relative_path} - {e}"
                 self._log(error_msg)
+                self._log_to_file("not_indexed", reason)
                 errors.append(error_msg)
             t1 = time.time()
             file_times.append(t1 - t0)
@@ -343,9 +555,13 @@ class CodeAnalysisAgent:
             self._log(f"⏳ Tiempo estimado restante: {est_min}m {est_sec}s")
         total_time = int(time.time() - start_time)
         min_total, sec_total = divmod(total_time, 60)
-        self._log(f"🏁 Análisis completado en {min_total}m {sec_total}s. Archivos indexados: {indexed_files}/{total_files}")
+        self._log(f"🏁 Análisis completado en {min_total}m {sec_total}s. Archivos indexados: {indexed_files}/{total_files}", force=True)
         if errors:
-            self._log(f"❗ Errores encontrados: {len(errors)}")
+            self._log(f"❗ Errores encontrados: {len(errors)}", force=True)
+        
+        # Finalizar archivos de log y mostrar resumen
+        if self._log_files["enabled"]:
+            self._finalize_log_files()
         project_summary = self._generate_project_summary(project_analysis)
         result = {
             "project_name": project_name,
@@ -368,7 +584,37 @@ class CodeAnalysisAgent:
                 if s and len(s) < 500:
                     cleaned.append(s)
                 elif len(s) >= 500:
-                    self._log(f"[WARN] Valor muy largo en '{field_name}' (ignorado): {s[:60]}...")
+                    # En lugar de ignorar, dividir en chunks más pequeños
+                    if field_name in ['relatedFiles', 'comments', 'functions', 'classes']:
+                        # Para estos campos, crear resumen o truncar inteligentemente
+                        if field_name == 'relatedFiles':
+                            # Extraer solo nombres de archivos/rutas, ignorar contenido embebido
+                            lines = s.split('\n')
+                            file_refs = []
+                            for line in lines:
+                                if any(ext in line for ext in ['.js', '.ts', '.html', '.css', '.json', '.vue', '.jsx', '.tsx']):
+                                    # Extraer referencias a archivos
+                                    matches = re.findall(r'[\'"\'](.*?\.(?:js|ts|html|css|json|vue|jsx|tsx))[\'"\']', line)
+                                    file_refs.extend(matches)
+                            if file_refs:
+                                cleaned.extend(file_refs[:10])  # Limitar a 10 referencias
+                            else:
+                                # Si no hay referencias de archivos, tomar un resumen
+                                cleaned.append(s[:300] + "...")
+                        elif field_name in ['comments']:
+                            # Para comentarios, tomar los primeros 200 caracteres
+                            cleaned.append(s[:200] + "...")
+                        else:
+                            # Para funciones y clases, dividir en chunks de 400 caracteres
+                            for chunk_start in range(0, len(s), 400):
+                                chunk = s[chunk_start:chunk_start+400]
+                                if chunk.strip():
+                                    cleaned.append(chunk)
+                    else:
+                        # Para otros campos, truncar con resumen
+                        cleaned.append(s[:300] + "... [truncado]")
+                    
+                    self._log(f"[INFO] Valor largo en '{field_name}' procesado en chunks/resumen (era {len(s)} chars)")
             except Exception as e:
                 self._log(f"[WARN] Valor no convertible a string en '{field_name}' (ignorado): {v} - {e}")
         return cleaned
@@ -395,7 +641,11 @@ class CodeAnalysisAgent:
         summary = self._generate_file_summary(content, file_analysis, relative_path)
         module_type = self._determine_module_type(relative_path, content, file_analysis)
         technology = self._determine_file_technology(content, file_ext, project_context)
+        # Crear chunks del contenido
         content_chunks = self._create_content_chunks(content, file_path)
+        if len(content_chunks) > 5:
+            self._log(f"📦 Archivo largo detectado, dividiéndolo en {len(content_chunks)} chunks")
+        
         related_files = self._find_related_files(content, imports, exports)
         embedding = self._get_embedding(content[:15000])
         # Limpiar todos los campos tipo lista
@@ -442,7 +692,12 @@ class CodeAnalysisAgent:
                 class_name=class_name,
                 vector=embedding
             )
-            self._index_file_chunks(content_chunks[5:], relative_path, project_name, module_type, technology)
+            # Indexar chunks adicionales si existen
+            additional_chunks = content_chunks[5:]
+            if additional_chunks:
+                self._log(f"💾 Guardando {len(additional_chunks)} chunks adicionales")
+                self._index_file_chunks(additional_chunks, relative_path, project_name, module_type, technology)
+            
             return True
         except Exception as e:
             print(f"Error indexando {relative_path}: {e}")
@@ -622,13 +877,16 @@ class CodeAnalysisAgent:
         except:
             pass  # Continuar si hay error en chunks adicionales
         
-        # Indexar cada chunk
+        # Indexar cada chunk con logging detallado
         for i, chunk in enumerate(chunks):
             if chunk.strip():
+                chunk_number = i + 6  # Chunks adicionales empiezan en 6
+                self._log(f"   📦 Guardando chunk {chunk_number} ({len(chunk)} caracteres)")
+                
                 chunk_data = {
                     "parentFile": file_path,
                     "chunkContent": chunk[:5000],  # Limitar tamaño del chunk
-                    "chunkType": f"chunk_{i+6}",  # Chunks adicionales empiezan en 6
+                    "chunkType": f"chunk_{chunk_number}",
                     "moduleType": module_type,
                     "technology": technology,
                     "projectName": project_name
@@ -640,8 +898,9 @@ class CodeAnalysisAgent:
                         class_name=class_name,
                         vector=embedding
                     )
-                except:
-                    pass  # Continuar si hay error en chunks adicionales
+                except Exception as e:
+                    self._log(f"   ⚠️ Error guardando chunk {chunk_number}: {e}")
+                    continue
 
     def _extract_imports(self, content: str, file_ext: str) -> List[str]:
         """

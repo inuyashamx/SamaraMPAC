@@ -50,6 +50,14 @@ def cmd_analizar(args):
     except Exception as e:
         print(f"⚠️ No se pudo verificar la existencia previa del proyecto: {e}")
     
+    # Habilitar logging detallado si se especifica verbose
+    if hasattr(args, 'verbose') and args.verbose:
+        agent._verbose_mode = True
+    
+    # Configurar archivos de log si se especifica --logfile
+    if hasattr(args, 'logfile') and args.logfile:
+        agent._setup_log_files("logs", project_name, clear_existing=True)
+    
     result = agent.analyze_and_index_project(project_path, project_name)
     
     if "error" in result:
@@ -260,6 +268,12 @@ Ejemplos de uso:
   # Analizar un proyecto
   python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp
 
+  # Analizar con logs detallados (archivos ignorados y chunks)
+  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --verbose
+
+  # Analizar generando archivos de log separados (en directorio "logs")
+  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --logfile
+
   # Consultar información
   python cli_analizador.py consultar MiApp "dame un resumen del módulo login"
 
@@ -283,7 +297,8 @@ Ejemplos de uso:
     parser_analizar = subparsers.add_parser('analizar', help='Analizar e indexar un proyecto')
     parser_analizar.add_argument('path', help='Ruta del proyecto a analizar')
     parser_analizar.add_argument('--name', help='Nombre del proyecto (opcional)')
-    parser_analizar.add_argument('--verbose', '-v', action='store_true', help='Mostrar información detallada')
+    parser_analizar.add_argument('--verbose', '-v', action='store_true', help='Mostrar información detallada y logs de archivos procesados')
+    parser_analizar.add_argument('--logfile', action='store_true', help='Generar archivos de log en directorio "logs" (borra logs anteriores)')
     parser_analizar.set_defaults(func=cmd_analizar)
     
     # Comando: consultar
