@@ -494,13 +494,14 @@ Para revisar este archivo:
             return False
         return True
 
-    def analyze_and_index_project(self, project_path: str, project_name: str = None) -> Dict:
+    def analyze_and_index_project(self, project_path: str, project_name: str = None, force_schema: bool = True) -> Dict:
         if project_name is None:
             project_name = os.path.basename(project_path)
         self._log(f"🚀 Iniciando análisis e indexación del proyecto: {project_name}", force=True)
         self._log(f"📁 Ruta: {project_path}", force=True)
-        if not self.create_weaviate_schema(project_name):
-            return {"error": "No se pudo crear el esquema en Weaviate"}
+        if force_schema:
+            if not self.create_weaviate_schema(project_name):
+                return {"error": "No se pudo crear el esquema en Weaviate"}
         project_analysis = self.analyze_project_structure(project_path)
         project_analysis["project_name"] = project_name
         project_analysis["analysis_date"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
@@ -516,7 +517,9 @@ Para revisar este archivo:
                 if file.startswith('.'):
                     continue
                 file_path = os.path.join(root, file)
-                all_files.append((file_path, os.path.relpath(file_path, project_path)))
+                # Normalizar rutas para usar siempre '/' como separador
+                relative_path = os.path.relpath(file_path, project_path).replace('\\', '/')
+                all_files.append((file_path, relative_path))
         total_files = len(all_files)
         for idx, (file_path, relative_path) in enumerate(all_files, 1):
             t0 = time.time()
@@ -620,6 +623,35 @@ Para revisar este archivo:
         return cleaned
 
     def _index_file(self, file_path: str, relative_path: str, project_name: str, project_context: Dict) -> bool:
+        class_name = f"Project_{self._sanitize_project_name(project_name)}"
+        # Normalizar ruta para consulta (asegurar que use '/' como separador)
+        normalized_path = relative_path.replace('\\', '/')
+        # Verificar si ya existe el archivo en Weaviate
+        try:
+            result = (
+                self.weaviate_client.query
+                .get(class_name, ["filePath", "projectName"])
+                .with_where({
+                    "operator": "And",
+                    "operands": [
+                        {"path": ["filePath"], "operator": "Equal", "valueString": normalized_path},
+                        {"path": ["projectName"], "operator": "Equal", "valueString": project_name}
+                    ]
+                })
+                .with_limit(1)
+                .do()
+            )
+            if (
+                "data" in result and "Get" in result["data"] and
+                class_name in result["data"]["Get"] and
+                len(result["data"]["Get"][class_name]) > 0
+            ):
+                self._log(f"indexacion ya existe, saltando... [{normalized_path}]")
+                self._log_to_file("not_indexed", f"indexacion ya existe, saltando...: {normalized_path}")
+                return True
+        except Exception as e:
+            self._log(f"[WARN] No se pudo verificar existencia previa en Weaviate para {normalized_path}: {e}")
+        # ... existente ...
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
@@ -661,7 +693,7 @@ Para revisar este archivo:
         related_files = self._clean_list_field(related_files, 'relatedFiles')
         data_object = {
             "projectName": project_name,
-            "filePath": relative_path,
+            "filePath": normalized_path,
             "fileName": os.path.basename(file_path),
             "fileType": file_ext,
             "moduleType": module_type,
@@ -685,7 +717,6 @@ Para revisar este archivo:
             "tags": self._generate_tags(relative_path, file_analysis, module_type),
             "contentChunks": content_chunks[:5]
         }
-        class_name = f"Project_{self._sanitize_project_name(project_name)}"
         try:
             self.weaviate_client.data_object.create(
                 data_object=data_object,
@@ -696,11 +727,11 @@ Para revisar este archivo:
             additional_chunks = content_chunks[5:]
             if additional_chunks:
                 self._log(f"💾 Guardando {len(additional_chunks)} chunks adicionales")
-                self._index_file_chunks(additional_chunks, relative_path, project_name, module_type, technology)
+                self._index_file_chunks(additional_chunks, normalized_path, project_name, module_type, technology)
             
             return True
         except Exception as e:
-            print(f"Error indexando {relative_path}: {e}")
+            print(f"Error indexando {normalized_path}: {e}")
             return False
 
     def _create_content_chunks(self, content: str, file_path: str) -> List[str]:

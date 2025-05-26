@@ -39,14 +39,17 @@ def cmd_analizar(args):
         return
     
     # Confirmación si ya existe el proyecto en Weaviate
+    force_schema = True
     try:
         existing_classes = [cls['class'] for cls in agent.weaviate_client.schema.get().get('classes', [])]
         class_name = f"Project_{project_name}" if project_name.startswith("_") else f"Project_{project_name}"
         if class_name in existing_classes:
             response = input(f"⚠️ Ya existe un proyecto llamado '{project_name}'. ¿Quieres sobreescribirlo? (s/N): ")
-            if response.strip().lower() not in ['s', 'sí', 'si', 'y', 'yes']:
-                print("❌ Operación cancelada. No se modificó el proyecto.")
-                return
+            if response.strip().lower() in ['s', 'sí', 'si', 'y', 'yes']:
+                force_schema = True
+            else:
+                print("🔄 Reanudando indexación: solo se agregarán archivos nuevos.")
+                force_schema = False
     except Exception as e:
         print(f"⚠️ No se pudo verificar la existencia previa del proyecto: {e}")
     
@@ -58,7 +61,7 @@ def cmd_analizar(args):
     if hasattr(args, 'logfile') and args.logfile:
         agent._setup_log_files("logs", project_name, clear_existing=True)
     
-    result = agent.analyze_and_index_project(project_path, project_name)
+    result = agent.analyze_and_index_project(project_path, project_name, force_schema=force_schema)
     
     if "error" in result:
         print(f"❌ Error: {result['error']}")
