@@ -1,7 +1,8 @@
 import requests
 from typing import List, Dict, Optional
-from conversation_manager import ConversationManager
-from memory_manager import MemoryManager
+from .conversation_manager import ConversationManager
+from .memory_manager import MemoryManager
+from .code_analysis_agent import CodeAnalysisAgent
 
 class ContextAgent:
     """
@@ -9,9 +10,11 @@ class ContextAgent:
     para cada conversación de manera inteligente.
     """
     
-    def __init__(self, weaviate_url: str = "http://localhost:8080"):
+    def __init__(self, weaviate_url: str = "http://localhost:8080", use_memories: bool = True, mode: str = "general"):
         self.ollama_url = "http://localhost:11434"
         self.embedding_model = "nomic-embed-text"
+        self.use_memories = use_memories
+        self.mode = mode
         
         # Palabras clave que indican necesidad de recuerdos
         self.memory_triggers = [
@@ -29,6 +32,9 @@ class ContextAgent:
         """
         Determina inteligentemente si necesitamos consultar recuerdos
         """
+        if not self.use_memories:
+            return False
+        
         user_input_lower = user_input.lower()
         
         # 1. Consultas muy simples no necesitan recuerdos
@@ -176,4 +182,88 @@ class ContextAgent:
                 "memory_items": len(memory_context),
                 "total_context_size": len(conversation_context) + len(memory_context)
             }
-        } 
+        }
+
+    def obtener_contexto_proyectos(self) -> str:
+        """Obtiene un resumen ultra conciso de los proyectos disponibles"""
+        try:
+            code_agent = CodeAnalysisAgent()
+            weaviate_client = code_agent.weaviate_client
+            
+            # Obtener clases de proyectos
+            clases = weaviate_client.schema.get().get('classes', [])
+            proyectos = [cls['class'] for cls in clases if cls['class'].startswith('Project_')]
+            
+            if not proyectos:
+                return "Sin proyectos."
+            
+            contexto = "Proyectos:\n"
+            count = 0
+            
+            for proyecto_clase in proyectos:
+                proyecto_nombre = proyecto_clase.replace('Project_', '')
+                
+                # Solo incluir proyectos con módulos
+                try:
+                    modulos_result = code_agent.list_project_modules(proyecto_nombre)
+                    if 'all_modules' in modulos_result and len(modulos_result['all_modules']) > 0:
+                        num_modulos = len(modulos_result['all_modules'])
+                        contexto += f"• {proyecto_nombre}: {num_modulos} módulos\n"
+                        count += 1
+                        
+                        # Solo 1 proyecto para no sobrecargar
+                        if count >= 1:
+                            break
+                            
+                except Exception:
+                    continue
+            
+            return contexto if count > 0 else "Sin proyectos con módulos."
+        except Exception as e:
+            return f"Error: {e}"
+
+    def obtener_contexto_completo(self, user_input: str, conversation_context: List[Dict], user_id: str = None) -> Dict:
+        """Método principal que obtiene todo el contexto necesario"""
+        # Formatear conversación de diccionarios a strings
+        formatted_conversation = self.format_conversation_context(conversation_context)
+        
+        context_data = {
+            "memory_context": [],
+            "conversation_context": formatted_conversation,
+            "project_context": "",
+            "used_memories": False,
+            "context_summary": {
+                "total_context_size": 0,
+                "memory_count": 0,
+                "conversation_count": len(formatted_conversation),
+                "project_modules_count": 0
+            }
+        }
+        
+        # Solo obtener recuerdos si están activados
+        if self.use_memories and self.should_use_memories(user_input, conversation_context):
+            context_data["memory_context"] = self.format_memory_context(self.obtener_recuerdos_relevantes(user_input, user_id), user_input)
+            context_data["used_memories"] = len(context_data["memory_context"]) > 0
+            context_data["context_summary"]["memory_count"] = len(context_data["memory_context"])
+        
+        # En modo developer, siempre incluir contexto de proyectos
+        if self.mode == "developer":
+            context_data["project_context"] = self.obtener_contexto_proyectos()
+            if context_data["project_context"]:
+                # Contar módulos en el contexto de proyecto
+                context_data["context_summary"]["project_modules_count"] = context_data["project_context"].count("- ")
+        
+        # Calcular tamaño total del contexto
+        total_size = (
+            len(str(context_data["memory_context"])) + 
+            len(str(context_data["conversation_context"])) + 
+            len(context_data["project_context"])
+        )
+        context_data["context_summary"]["total_context_size"] = total_size
+        
+        return context_data 
+
+    def obtener_recuerdos_relevantes(self, user_input: str, user_id: str) -> List[Dict]:
+        """Obtiene recuerdos relevantes para el input del usuario"""
+        # Por ahora devolver lista vacía - se puede implementar más tarde si es necesario
+        return [] 

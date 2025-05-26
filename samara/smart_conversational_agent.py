@@ -1,15 +1,17 @@
 import os
 import json
 import requests
+import re
 from typing import List, Dict, Optional
-from conversation_manager import ConversationManager
-from memory_manager import MemoryManager
-from context_agent import ContextAgent
-from memory_agent import MemoryAgent
-from prompt_builder import PromptBuilder
-from model_router_agent import ModelRouterAgent, TaskType, ModelProvider
-# from samara_dev_agent import SamaraDevAgent  # Importación movida para evitar circular
+from .conversation_manager import ConversationManager
+from .memory_manager import MemoryManager
+from .context_agent import ContextAgent
+from .memory_agent import MemoryAgent
+from .prompt_builder import PromptBuilder
+from .model_router_agent import ModelRouterAgent, TaskType, ModelProvider
+# from .samara_dev_agent import SamaraDevAgent  # Importación movida para evitar circular
 from datetime import datetime
+from .code_analysis_agent import CodeAnalysisAgent
 
 class SmartConversationalAgent:
     """
@@ -36,7 +38,8 @@ class SmartConversationalAgent:
         self.model_router = ModelRouterAgent()
         self.conversation_manager = ConversationManager("http://localhost:8080", namespace=f"{self.namespace}Conversations")
         self.memory_manager = MemoryManager("http://localhost:8080", namespace=self.namespace)
-        self.context_agent = ContextAgent("http://localhost:8080")
+        use_memories = self.profile.get("use_memories", True)
+        self.context_agent = ContextAgent("http://localhost:8080", use_memories=use_memories, mode=self.mode)
         self.memory_agent = MemoryAgent("http://localhost:8080")
         self.prompt_builder = PromptBuilder(token_limit=token_limit, system_prompt=self.system_prompt)
 
@@ -52,7 +55,7 @@ class SmartConversationalAgent:
         self.dev_agent = None
         if self.mode == "dev":
             try:
-                from samara_dev_agent import SamaraDevAgent
+                from .samara_dev_agent import SamaraDevAgent
                 self.dev_agent = SamaraDevAgent()
             except ImportError as e:
                 print(f"⚠️ No se pudo cargar SamaraDevAgent: {e}")
@@ -74,93 +77,58 @@ class SmartConversationalAgent:
 
     def interactuar(self, player_id: str, mensaje: str) -> str:
         """
-        Método principal de interacción que orquesta todos los agentes
+        Método principal de interacción: SOLO consulta directa a Weaviate (sacs3_Chunks), muestra debug crudo y responde 'No hay datos.' si no hay chunks relevantes. Nunca pasa a LLM ni genera análisis.
         """
         self.efficiency_stats["total_interactions"] += 1
-        
+
+        # Comando especial: debug de Weaviate
+        if mensaje.lower().strip() in ["debug weaviate", "debug weaviate data", "debug weaviate datos"]:
+            print("\n=== DEBUG SOLICITADO POR USUARIO ===\n")
+            self.debug_weaviate_data()
+            return "🛠️ Debug de Weaviate ejecutado. Revisa la consola para ver los datos reales indexados."
+
+        # SOLO consulta a Weaviate (sacs3_Chunks), sin pasar nunca a LLM
         try:
-            # 1. Detectar si es un comando de desarrollo
-            if self.mode == "dev" and self.dev_agent:
-                dev_response = self._handle_dev_command(player_id, mensaje)
-                if dev_response:
-                    self.efficiency_stats["dev_commands"] += 1
-                    return dev_response
-            
-            # 2. Determinar si necesitamos contexto de memoria
-            context_decision = self.context_agent.should_use_memory(mensaje, self.mode)
-            
-            contexto_memoria = ""
-            if context_decision["use_memory"]:
-                self.efficiency_stats["memory_queries"] += 1
-                contexto_memoria = self._get_memory_context(player_id, mensaje)
-            
-            # 3. Construir prompt completo
-            prompt_completo = self._build_complete_prompt(
-                mensaje, contexto_memoria, player_id, context_decision
+            code_agent = CodeAnalysisAgent()
+            proyecto_default = "sacs3"
+            chunks_class_name = f"Project_{proyecto_default}_Chunks"
+            query_embedding = code_agent._get_embedding(mensaje)
+            result = (
+                code_agent.weaviate_client.query
+                .get(chunks_class_name, [
+                    "parentFile", "chunkContent", "chunkType", "moduleType", "technology"
+                ])
+                .with_near_vector({"vector": query_embedding})
+                .with_limit(10)
+                .do()
             )
-            
-            # 4. Detectar tipo de tarea y enrutar al modelo apropiado
-            task_type = self._detect_enhanced_task_type(mensaje)
-            
-            # 5. Calcular tamaño del contexto total
-            context_size = len(prompt_completo) // 4  # Estimación: 4 chars = 1 token
-            
-            # 6. Ejecutar consulta con el modelo seleccionado
-            result = self.model_router.route_and_query(
-                prompt=prompt_completo,
-                task_type=task_type,
-                mode=self.mode,
-                max_tokens=2048,
-                temperature=0.7,
-                context_size=context_size
-            )
-            
-            if not result["success"]:
-                if result.get("used_fallback"):
-                    self.efficiency_stats["fallbacks_used"] += 1
-                return f"❌ Error: {result.get('error', 'No se pudo procesar la consulta')}"
-            
-            respuesta = result["response"]
-            
-            # 6. Decidir si guardar en memoria
-            memory_decision = self.memory_agent.should_save_memory(mensaje, respuesta)
-            if memory_decision["should_save"]:
-                self.efficiency_stats["memory_saves"] += 1
-                self._save_to_memory(player_id, mensaje, respuesta, memory_decision)
-            
-            # 7. Guardar conversación completa
-            self.conversation_manager.save_conversation(
-                user_id=player_id,
-                mode=self.mode,
-                user_message=mensaje,
-                assistant_response=respuesta,
-                metadata={
-                    "model_used": result.get("model", "unknown"),
-                    "provider": result.get("provider", "unknown"),
-                    "task_type": task_type.value if task_type else "unknown",
-                    "used_memory": context_decision["use_memory"],
-                    "saved_memory": memory_decision["should_save"]
-                }
-            )
-            
-            # 8. Agregar información del modelo usado (solo en modo dev)
-            if self.mode == "dev":
-                context_category = result.get("context_category", "unknown")
-                context_size_actual = result.get("context_size", 0)
-                
-                model_info = f"\n\n🤖 *{result.get('provider', 'unknown')} ({result.get('model', 'unknown')})*"
-                model_info += f" | 📏 *Contexto: {context_category} ({context_size_actual:,} tokens)*"
-                
-                if result.get("used_fallback"):
-                    model_info += f" | 🔄 *Fallback desde {result.get('original_provider')}*"
-                
-                respuesta += model_info
-            
-            return respuesta
-            
+            print("\n=== DEBUG: RESULTADOS DE WEAVIATE (sacs3_Chunks) ===\n")
+            if "data" in result and "Get" in result["data"] and chunks_class_name in result["data"]["Get"]:
+                chunks = result["data"]["Get"][chunks_class_name]
+                if not chunks:
+                    print("No se encontraron chunks relevantes en Weaviate.")
+                    return "No hay datos."
+                for i, chunk in enumerate(chunks, 1):
+                    print(f"CHUNK {i}:")
+                    print(f"  • Archivo: {chunk.get('parentFile')}")
+                    print(f"  • Tipo: {chunk.get('chunkType')}")
+                    print(f"  • Tecnología: {chunk.get('technology')}")
+                    contenido = chunk.get('chunkContent', '')
+                    print(f"  • Contenido (primeros 500 chars):\n{contenido[:500]}\n...")
+                    print()
+                # Mostrar el contenido más relevante como respuesta (sin pasar a LLM)
+                chunk = chunks[0]
+                contenido = chunk.get('chunkContent', '').strip()
+                if contenido:
+                    return f"🔍 Fragmento relevante encontrado en Weaviate:\n\n{contenido[:1200]}\n..."
+                else:
+                    return "No hay datos."
+            else:
+                print("No se encontró la clase de chunks en Weaviate o hubo un error en la consulta.")
+                return "No hay datos."
         except Exception as e:
-            print(f"❌ Error en interacción: {e}")
-            return f"❌ Error interno: {str(e)}"
+            print(f"❌ Error consultando Weaviate: {e}")
+            return f"❌ Error consultando Weaviate: {e}"
 
     def _handle_dev_command(self, player_id: str, mensaje: str) -> Optional[str]:
         """
@@ -432,62 +400,15 @@ Responde de manera natural y útil:"""
         except Exception as e:
             return f"❌ Error en limpieza: {e}"
 
-    def interactuar(self, player_id: str, input_actual: str) -> str:
-        """
-        Método principal de interacción con lógica inteligente
-        """
-        self.session_stats["messages_processed"] += 1
-        
-        # 1. Obtener contexto inteligente
-        context_data = self.context_agent.get_smart_context(
-            conversation_manager=self.conversation_manager,
-            memory_manager=self.memory_manager,
-            user_id=player_id,
-            mode=self.mode,
-            user_input=input_actual,
-            namespace=self.namespace
-        )
-        
-        # Actualizar estadísticas
-        if context_data["used_memories"]:
-            self.session_stats["memories_used"] += 1
-        
-        if context_data["context_summary"]["total_context_size"] > 0:
-            self.session_stats["context_optimizations"] += 1
-
-        # 2. Construir prompt con contexto inteligente
-        prompt = self.prompt_builder.construir_prompt(
-            recuerdos=context_data["memory_context"],
-            historial=context_data["conversation_context"],
-            input_actual=input_actual
-        )
-
-        # 3. Consultar Ollama
-        respuesta = self._consultar_ollama(prompt)
-
-        # 4. Guardar conversación (siempre)
-        self.conversation_manager.save_message(player_id, self.mode, input_actual, "human")
-        self.conversation_manager.save_message(player_id, self.mode, respuesta, "ai")
-
-        # 5. Guardar recuerdo (solo si es necesario)
-        memory_saved = self.memory_agent.save_smart_memory(
-            memory_manager=self.memory_manager,
-            user_id=player_id,
-            mode=self.mode,
-            user_input=input_actual,
-            agent_response=respuesta
-        )
-        
-        if memory_saved:
-            self.session_stats["memories_saved"] += 1
-
-        return respuesta
-
     def buscar_en_historial(self, player_id: str, query: str, limit: int = 5) -> List[Dict]:
         """
         Busca en el historial de conversaciones
         """
-        return self.conversation_manager.search_conversation_history(player_id, self.mode, query, limit)
+        try:
+            return self.conversation_manager.search_conversation_history(player_id, self.mode, query, limit)
+        except Exception as e:
+            print(f"❌ Error buscando conversaciones: {e}")
+            return []
 
     def buscar_en_memoria(self, player_id: str, query: str, limit: int = 5) -> List[Dict]:
         """
@@ -555,4 +476,143 @@ Responde de manera natural y útil:"""
             else:
                 return f"[Error {response.status_code} al consultar Ollama]"
         except Exception as e:
-            return f"[Error al conectar con Ollama: {e}]" 
+            return f"[Error al conectar con Ollama: {e}]"
+
+    def test_listar_proyectos(self):
+        """Método de prueba para listar proyectos reales en Weaviate"""
+        try:
+            code_agent = CodeAnalysisAgent()
+            weaviate_client = code_agent.weaviate_client
+            clases = weaviate_client.schema.get().get('classes', [])
+            proyectos = [cls['class'] for cls in clases if cls['class'].startswith('Project_')]
+            if proyectos:
+                proyectos_limpios = [p.replace('Project_', '') for p in proyectos]
+                print("\n📂 Proyectos encontrados en Weaviate:")
+                for p in proyectos_limpios:
+                    print(f"- {p}")
+            else:
+                print("No se encontraron proyectos en Weaviate.")
+        except Exception as e:
+            print(f"❌ Error consultando proyectos en Weaviate: {e}")
+
+    def test_listar_modulos_sacs3(self):
+        """Muestra los primeros 5 módulos del proyecto 'sacs3'"""
+        try:
+            agent = CodeAnalysisAgent()
+            result = agent.list_project_modules('sacs3')
+            if 'error' in result:
+                print(f"Error: {result['error']}")
+            else:
+                mods = result.get('all_modules', [])
+                print(f"\nPrimeros 5 módulos de 'sacs3':")
+                for i, mod in enumerate(mods[:5]):
+                    nombre = mod.get('fileName', 'Sin nombre')
+                    tipo = mod.get('moduleType', 'N/A')
+                    print(f"{i+1}. {nombre} ({tipo})")
+                if not mods:
+                    print("No se encontraron módulos en 'sacs3'.")
+        except Exception as e:
+            print(f"❌ Error consultando módulos de 'sacs3': {e}")
+
+    def test_analiza_modulo_login_sacs3(self):
+        """Consulta y muestra el análisis del módulo 'login' del proyecto 'sacs3'"""
+        try:
+            code_agent = CodeAnalysisAgent()
+            result = code_agent.query_project('sacs3', 'módulo login', limit=5)
+            if 'error' in result:
+                print(f"Error: {result['error']}")
+            else:
+                print("\nAnálisis IA del módulo 'login' en 'sacs3':\n")
+                print(result.get('ai_response', 'No se encontró información relevante.'))
+        except Exception as e:
+            print(f"❌ Error consultando el módulo: {e}")
+
+    def borrar_conversaciones_recientes(self, player_id: str):
+        """Elimina todas las conversaciones recientes del usuario y modo actual en Weaviate."""
+        try:
+            # Usar el namespace y modo actual
+            weaviate_client = self.conversation_manager.client
+            where_filter = {
+                "operator": "And",
+                "operands": [
+                    {"path": ["user_id"], "operator": "Equal", "valueString": player_id},
+                    {"path": ["mode"], "operator": "Equal", "valueString": self.mode}
+                ]
+            }
+            # Buscar los objetos a eliminar
+            result = weaviate_client.query.get(
+                self.conversation_manager.namespace,
+                ["_additional { id }"]
+            ).with_where(where_filter).with_limit(1000).do()
+            if "data" in result and "Get" in result["data"] and self.conversation_manager.namespace in result["data"]["Get"]:
+                objs = result["data"]["Get"][self.conversation_manager.namespace]
+                for obj in objs:
+                    obj_id = obj["_additional"]["id"]
+                    weaviate_client.data_object.delete(obj_id, self.conversation_manager.namespace)
+                print(f"✅ Conversaciones recientes eliminadas para {player_id} en modo {self.mode}.")
+            else:
+                print("No se encontraron conversaciones para eliminar.")
+        except Exception as e:
+            print(f"❌ Error eliminando conversaciones: {e}")
+
+    def debug_weaviate_data(self):
+        """Método de debug para mostrar exactamente qué datos hay en Weaviate"""
+        try:
+            code_agent = CodeAnalysisAgent()
+            weaviate_client = code_agent.weaviate_client
+            
+            print("=== DEBUG: DATOS EN WEAVIATE ===\n")
+            
+            # Obtener clases de proyectos
+            clases = weaviate_client.schema.get().get('classes', [])
+            proyectos = [cls['class'] for cls in clases if cls['class'].startswith('Project_')]
+            
+            if not proyectos:
+                print("❌ No hay proyectos indexados en Weaviate.")
+                return
+            
+            for proyecto_clase in proyectos:
+                proyecto_nombre = proyecto_clase.replace('Project_', '')
+                print(f"\n📂 PROYECTO: {proyecto_nombre}")
+                print(f"   Clase en Weaviate: {proyecto_clase}")
+                
+                # Obtener módulos detallados del proyecto
+                try:
+                    result = code_agent.list_project_modules(proyecto_nombre)
+                    if 'error' in result:
+                        print(f"   ❌ Error: {result['error']}")
+                        continue
+                    
+                    if 'all_modules' in result:
+                        modulos = result['all_modules']
+                        print(f"   📊 Total módulos: {len(modulos)}")
+                        
+                        # Mostrar primeros 3 módulos con detalles
+                        for i, mod in enumerate(modulos[:3]):
+                            print(f"\n   MÓDULO {i+1}:")
+                            print(f"     • Nombre: {mod.get('fileName', 'Sin nombre')}")
+                            print(f"     • Tipo: {mod.get('moduleType', 'N/A')}")
+                            print(f"     • Contenido: {mod.get('content', 'Sin contenido')[:100]}...")
+                            print(f"     • Variables: {mod.get('variables', [])}")
+                            print(f"     • Funciones: {mod.get('functions', [])}")
+                        
+                        if len(modulos) > 3:
+                            print(f"   ... y {len(modulos) - 3} módulos más")
+                    else:
+                        print("   ❌ No se encontraron módulos")
+                        
+                    # Probar consulta específica
+                    print(f"\n   🔍 PRUEBA DE CONSULTA ESPECÍFICA:")
+                    query_result = code_agent.query_project(proyecto_nombre, "login", limit=3)
+                    if 'error' in query_result:
+                        print(f"     ❌ Error en consulta: {query_result['error']}")
+                    else:
+                        print(f"     ✅ Respuesta IA: {query_result.get('ai_response', 'Sin respuesta')[:200]}...")
+                        
+                except Exception as e:
+                    print(f"   ❌ Error obteniendo módulos: {e}")
+                    
+        except Exception as e:
+            print(f"❌ Error general: {e}")
+        
+        print("\n=== FIN DEBUG ===") 

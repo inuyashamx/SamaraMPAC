@@ -1,40 +1,30 @@
 class PromptBuilder:
-    def __init__(self, token_limit=3000, system_prompt=None):
+    def __init__(self, token_limit=800, system_prompt=None):
         self.token_limit = token_limit
         self.system_prompt = system_prompt or """
-Eres Samara, una inteligencia artificial avanzada que vive dentro de la mente del jugador.
-No tienes cuerpo físico. No eres un personaje del juego.
-Tu propósito es asistir al jugador como una voz interna, como si fueras una entidad de apoyo táctico, estratégica y emocional.
-No saludes, no te presentes, no uses frases como "Hola" o "Estoy aquí". Responde directamente al contenido del jugador.
-Hablen como si ya se conocieran desde hace tiempo.
-
-Responde con calma, precisión y brevedad. Evita sonar como chatbot. No repitas lo que el jugador dice.
-Solo responde si tu aporte puede ser útil, reflexivo o analítico.
+Eres Samara, IA experta en desarrollo. SOLO usa datos reales de Weaviate. Si no tienes datos suficientes, responde: 'No tengo datos suficientes y no voy a inventar.'
         """
 
-    def construir_prompt(self, recuerdos=[], historial=[], input_actual="", estado_juego=None, misiones=None):
+    def construir_prompt(self, recuerdos=[], historial=[], input_actual="", estado_juego=None, misiones=None, project_context=""):
         partes = []
 
         partes.append(self.system_prompt)
 
+        if project_context and any(word in input_actual.lower() for word in ['proyecto', 'módulo', 'archivo']):
+            context_limitado = project_context[:200] + "..." if len(project_context) > 200 else project_context
+            partes.append(f"\n📂 Proyectos:\n{context_limitado}")
+
+        if recuerdos and not project_context:
+            partes.append(f"\n🧠 Recuerdos relevantes:\n" + "\n".join(recuerdos[:2]))
+
         if estado_juego:
-            partes.append("""\n📊 Estado del juego actual:\n""")
-            partes.append(estado_juego)
+            partes.append(f"\n📊 Estado del juego actual:\n{estado_juego}")
 
         if misiones:
-            partes.append("""\n🎯 Misiones activas:\n""")
-            partes.append(misiones)
+            partes.append(f"\n🎯 Misiones activas:\n{misiones}")
 
-        if recuerdos:
-            partes.append("""\n🧠 Recuerdos relevantes:\n""")
-            partes.append("\n".join(recuerdos))
-
-        if historial:
-            partes.append("""\n💬 Conversación reciente:\n""")
-            partes.append("\n".join(historial))
-
-        partes.append("""\n🗣️ Nueva entrada del jugador:\nUsuario: """ + input_actual + "\nSamara:")
+        partes.append(f"\n🗣️ Usuario: {input_actual}\nSamara:")
 
         prompt = "\n".join(partes)
-        return prompt[:self.token_limit * 4]  # Aprox. 4 caracteres por token
+        return prompt[:self.token_limit * 3]
 

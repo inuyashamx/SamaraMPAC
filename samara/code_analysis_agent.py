@@ -1262,7 +1262,8 @@ Responde en español y máximo 300 palabras.
 
     def query_project(self, project_name: str, query: str, limit: int = 20) -> Dict:
         """
-        Realiza una consulta semántica COMPLETA sobre un proyecto específico
+        Realiza una consulta semántica COMPLETA sobre un proyecto específico.
+        Si la búsqueda semántica no arroja resultados, busca por coincidencia parcial en fileName y content.
         """
         if not self.weaviate_client:
             return {"error": "Weaviate no está disponible"}
@@ -1271,7 +1272,7 @@ Responde en español y máximo 300 palabras.
         chunks_class_name = f"Project_{self._sanitize_project_name(project_name)}_Chunks"
         
         try:
-            # Consulta principal
+            # 1. Búsqueda semántica (embeddings)
             query_embedding = self._get_embedding(query)
             result = (
                 self.weaviate_client.query
@@ -1285,11 +1286,33 @@ Responde en español y máximo 300 palabras.
                 .with_limit(limit)
                 .do()
             )
-            
             files_found = []
             if 'data' in result and 'Get' in result['data']:
                 files_found = result['data']['Get'].get(class_name, [])
-            
+
+            # 2. Si no hay resultados relevantes, buscar por Like en fileName y content
+            if not files_found:
+                like_result = (
+                    self.weaviate_client.query
+                    .get(class_name, [
+                        "projectName", "filePath", "fileName", "moduleType", 
+                        "technology", "summary", "functions", "classes", 
+                        "endpoints", "styles", "events", "variables", "comments",
+                        "relatedFiles", "contentChunks", "complexity", "tags", "content"
+                    ])
+                    .with_where({
+                        "operator": "Or",
+                        "operands": [
+                            {"path": ["fileName"], "operator": "Like", "valueString": f"*{query}*"},
+                            {"path": ["content"], "operator": "Like", "valueString": f"*{query}*"}
+                        ]
+                    })
+                    .with_limit(limit)
+                    .do()
+                )
+                if 'data' in like_result and 'Get' in like_result['data']:
+                    files_found = like_result['data']['Get'].get(class_name, [])
+
             # Consulta en chunks para obtener más contexto
             chunks_found = []
             try:
@@ -1303,7 +1326,6 @@ Responde en español y máximo 300 palabras.
                     .with_limit(15)
                     .do()
                 )
-                
                 if 'data' in chunks_result and 'Get' in chunks_result['data']:
                     chunks_found = chunks_result['data']['Get'].get(chunks_class_name, [])
             except:

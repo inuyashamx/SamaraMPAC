@@ -1,6 +1,6 @@
 import requests
 from typing import List, Dict, Optional
-from memory_manager import MemoryManager
+from .memory_manager import MemoryManager
 from datetime import datetime
 
 class MemoryAgent:

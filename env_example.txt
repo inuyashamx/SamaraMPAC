@@ -5,7 +5,7 @@
 CLAUDE_API_KEY=tu_claude_api_key_aqui
 
 # OpenAI (GPT-4)
-OPENAI_API_KEY=tu_openai_api_key_aqui
+OPENAI_API_KEY=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
 
 # Google Gemini
 GEMINI_API_KEY=tu_gemini_api_key_aqui

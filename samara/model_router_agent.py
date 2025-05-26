@@ -4,6 +4,10 @@ import requests
 from typing import Dict, List, Optional, Tuple
 from enum import Enum
 import time
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env
+load_dotenv()
 
 class TaskType(Enum):
     """Tipos de tareas para el enrutamiento de modelos"""
@@ -191,46 +195,26 @@ class ModelRouterAgent:
         else:
             print("⚠️ Solo Ollama disponible - considera agregar API keys para más opciones")
 
-    def route_and_query(self, 
-                       prompt: str, 
-                       task_type: TaskType = None,
-                       mode: str = "dev",
-                       force_provider: ModelProvider = None,
-                       max_tokens: int = 2048,
-                       temperature: float = 0.7,
-                       context_size: int = None) -> Dict:
+    def route_and_query(self, prompt: str, task_type: Optional[TaskType] = None, mode: str = "default", context_size: int = 0) -> Dict:
         """
-        Método principal: determina el modelo y ejecuta la consulta considerando contexto
+        Redirige SIEMPRE a OpenAI (GPT-4), ignorando el resto de lógica y proveedores.
         """
-        self.usage_stats["total_requests"] += 1
-        
-        # 1. Estimar tamaño del contexto si no se proporciona
-        if context_size is None:
-            context_size = self._estimate_context_size(prompt)
-        
-        # 2. Detectar tipo de tarea si no se especifica
-        if task_type is None:
-            task_type = self._detect_task_type(prompt, mode)
-        
-        # 3. Seleccionar proveedor considerando tarea y contexto
-        if force_provider:
-            provider = force_provider
-        else:
-            provider = self._select_best_provider(task_type, prompt, context_size)
-        
-        # 4. Ejecutar consulta con fallbacks
-        result = self._execute_with_fallback(
-            provider, prompt, task_type, max_tokens, temperature, context_size
-        )
-        
-        # 5. Actualizar estadísticas
-        self._update_stats(provider, task_type, result["success"], context_size)
-        
-        # 6. Agregar información de contexto al resultado
-        result["context_size"] = context_size
-        result["context_category"] = self._categorize_context_size(context_size)
-        
-        return result
+        try:
+            provider = ModelProvider.GPT4
+            response = self._query_openai(prompt)
+            return {
+                "success": True,
+                "response": response,
+                "provider": provider.value,
+                "used_fallback": False
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "provider": "gpt4",
+                "used_fallback": False
+            }
 
     def _categorize_context_size(self, context_size: int) -> str:
         """Categoriza el tamaño del contexto"""
@@ -366,6 +350,20 @@ class ModelRouterAgent:
         
         # Para contextos medianos (2k-10k tokens), considerar todos
         elif context_size > 2000:
+            # Para análisis de código, preferir modelos cloud sobre Ollama
+            if task_type == TaskType.ANALISIS_CODIGO:
+                cloud_providers = [p for p in context_capable_providers 
+                                 if p != ModelProvider.OLLAMA]
+                if cloud_providers:
+                    # Preferir GPT-4 para análisis de código
+                    if ModelProvider.GPT4 in cloud_providers:
+                        print(f"🧠 Análisis de código ({context_size:,} tokens) → GPT-4")
+                        return ModelProvider.GPT4
+                    # Fallback a Claude
+                    elif ModelProvider.CLAUDE in cloud_providers:
+                        print(f"🧠 Análisis de código ({context_size:,} tokens) → Claude")
+                        return ModelProvider.CLAUDE
+            
             # Preferir proveedores que manejen bien este tamaño
             optimal_providers = [p for p in context_capable_providers 
                                if context_size <= self.model_config[p]["optimal_context"]]
