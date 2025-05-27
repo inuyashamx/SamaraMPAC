@@ -12,6 +12,7 @@ from .model_router_agent import ModelRouterAgent, TaskType, ModelProvider
 # from .samara_dev_agent import SamaraDevAgent  # Importación movida para evitar circular
 from datetime import datetime
 from .code_analysis_agent import CodeAnalysisAgent
+import time
 
 class SmartConversationalAgent:
     """
@@ -129,6 +130,53 @@ class SmartConversationalAgent:
         except Exception as e:
             print(f"❌ Error consultando Weaviate: {e}")
             return f"❌ Error consultando Weaviate: {e}"
+
+    def interactuar_verbose(self, player_id: str, mensaje: str) -> dict:
+        """
+        Igual que interactuar, pero devuelve un log detallado de cada paso:
+        - Consulta enviada a Weaviate
+        - Respuesta cruda de Weaviate
+        - Prompt enviado a la IA
+        - Respuesta final de la IA
+        """
+        log = {}
+        self.efficiency_stats["total_interactions"] += 1
+        code_agent = CodeAnalysisAgent()
+        proyecto_default = "sacs3"  # Puedes parametrizar esto si lo deseas
+        chunks_class_name = f"Project_{proyecto_default}_Chunks"
+        query_embedding = code_agent._get_embedding(mensaje)
+        log["weaviate_query"] = {
+            "class": chunks_class_name,
+            "vector_preview": query_embedding[:5],  # Solo los primeros valores para no saturar
+            "mensaje": mensaje
+        }
+        # Consulta a Weaviate
+        try:
+            result = (
+                code_agent.weaviate_client.query
+                .get(chunks_class_name, [
+                    "parentFile", "chunkContent", "chunkType", "moduleType", "technology"
+                ])
+                .with_near_vector({"vector": query_embedding})
+                .with_limit(10)
+                .do()
+            )
+            log["weaviate_response"] = result
+            # Construir contexto para la IA
+            chunks = []
+            if "data" in result and "Get" in result["data"] and chunks_class_name in result["data"]["Get"]:
+                chunks = result["data"]["Get"][chunks_class_name]
+            contexto = "\n\n".join([
+                f"Archivo: {c.get('parentFile')}\nTipo: {c.get('chunkType')}\nTecnología: {c.get('technology')}\nContenido:\n{c.get('chunkContent','')[:800]}..." for c in chunks[:3]
+            ])
+            prompt = f"Usuario pregunta: {mensaje}\n\nContexto relevante del proyecto:\n{contexto}\n\nResponde de forma técnica, estructurada y en español."
+            log["prompt_ia"] = prompt
+            respuesta_ia = self._consultar_ollama(prompt)
+            log["respuesta_ia"] = respuesta_ia
+            return log
+        except Exception as e:
+            log["error"] = f"Error consultando Weaviate o IA: {e}"
+            return log
 
     def _handle_dev_command(self, player_id: str, mensaje: str) -> Optional[str]:
         """
@@ -615,4 +663,139 @@ Responde de manera natural y útil:"""
         except Exception as e:
             print(f"❌ Error general: {e}")
         
-        print("\n=== FIN DEBUG ===") 
+        print("\n=== FIN DEBUG ===")
+
+class SemanticQueryAgent:
+    """
+    Agente LLM-driven: usa un LLM para razonar, formular y refinar la consulta a Weaviate.
+    Reintenta hasta 3 veces si la respuesta no es relevante.
+    """
+    def __init__(self, weaviate_client=None, ollama_url="http://localhost:11434"):
+        if weaviate_client is None:
+            from .code_analysis_agent import CodeAnalysisAgent
+            self.code_agent = CodeAnalysisAgent()
+            self.weaviate_client = self.code_agent.weaviate_client
+        else:
+            self.weaviate_client = weaviate_client
+        self.ollama_url = ollama_url
+        self._esquema_cache = None
+
+    def _get_schema(self):
+        if self._esquema_cache is None:
+            self._esquema_cache = self.weaviate_client.schema.get()
+        return self._esquema_cache
+
+    def _prompt_llm(self, prompt):
+        payload = {
+            "model": "llama3:instruct",
+            "prompt": prompt,
+            "stream": False
+        }
+        try:
+            response = requests.post(f"{self.ollama_url}/api/generate", json=payload)
+            if response.status_code == 200:
+                return response.json().get("response", "").strip()
+            else:
+                return f"[Error {response.status_code} al consultar Ollama]"
+        except Exception as e:
+            return f"[Error al conectar con Ollama: {e}]"
+
+    def _parse_plan(self, llm_response):
+        import json
+        try:
+            # Buscar el primer bloque JSON en la respuesta
+            start = llm_response.find('{')
+            end = llm_response.rfind('}') + 1
+            if start != -1 and end != -1:
+                plan = json.loads(llm_response[start:end])
+                return plan
+            return None
+        except Exception:
+            return None
+
+    def _ejecutar_plan(self, clase, plan):
+        # Soporta filtro por fileName, filePath, campo_objetivo, palabras_clave
+        campo = plan.get("campo_objetivo", "summary")
+        filtro = plan.get("filtro", {})
+        palabras_clave = plan.get("palabras_clave", [])
+        fallback = plan.get("fallback", "summary")
+        query = self.weaviate_client.query.get(clase, [campo, "fileName", "filePath"])
+        if filtro:
+            for k, v in filtro.items():
+                query = query.with_where({"operator": "Equal", "path": [k], "valueString": v})
+        query = query.with_limit(10)
+        result = query.do()
+        # Filtrar por palabras clave si es necesario
+        if palabras_clave:
+            objs = result['data']['Get'].get(clase, [])
+            filtrados = []
+            for obj in objs:
+                contenido = obj.get(campo, "")
+                if any(kw.lower() in contenido.lower() for kw in palabras_clave):
+                    filtrados.append(obj)
+            result['data']['Get'][clase] = filtrados
+        return result
+
+    def _respuesta_util(self, result, clase, campo):
+        objs = result['data']['Get'].get(clase, [])
+        if not objs:
+            return False
+        # Considera útil si hay contenido no vacío
+        for obj in objs:
+            if obj.get(campo, "").strip():
+                return True
+        return False
+
+    def consulta_inteligente(self, proyecto, pregunta, archivo=None):
+        log = {"intentos": []}
+        clase = f"Project_{proyecto}"
+        esquema = self._get_schema()
+        campos = [p['name'] for c in esquema['classes'] if c['class'] == clase for p in c.get('properties', [])]
+        prompt_base = f"""
+Usuario pregunta: "{pregunta}"
+
+Esquema de Weaviate para el proyecto:
+{campos}
+
+Si la pregunta menciona un archivo, módulo o entidad, sugiere el campo y filtro adecuado.
+Devuélveme un JSON con:
+- campo_objetivo: el campo más relevante para buscar
+- filtro: si hay que buscar por nombre de archivo, path, etc. (ejemplo: {{"fileName": "login.html"}})
+- palabras_clave: si hay que buscar por keywords en el contenido
+- fallback: si no hay coincidencia, ¿qué hacer? (otro campo o estrategia)
+"""
+        prompt = prompt_base
+        for intento in range(1, 4):
+            paso = {"intento": intento, "prompt": prompt}
+            llm_response = self._prompt_llm(prompt)
+            paso["plan_llm"] = llm_response
+            plan = self._parse_plan(llm_response)
+            if not plan:
+                paso["error"] = "No se pudo parsear el plan del LLM"
+                log["intentos"].append(paso)
+                break
+            paso["plan_parseado"] = plan
+            result = self._ejecutar_plan(clase, plan)
+            paso["respuesta_weaviate"] = result
+            campo = plan.get("campo_objetivo", "summary")
+            if self._respuesta_util(result, clase, campo):
+                # Sintetizar respuesta
+                objs = result['data']['Get'].get(clase, [])
+                if campo == "content":
+                    contenidos = [obj.get("content", "") for obj in objs]
+                    paso["respuesta_final"] = "\n\n".join(contenidos[:3])[:2000] + ("..." if len(contenidos) > 3 else "")
+                else:
+                    res = []
+                    for obj in objs:
+                        res.append(f"Archivo: {obj.get('fileName')}\n{campo}: {obj.get(campo, '')[:300]}\n---")
+                    paso["respuesta_final"] = "\n".join(res)
+                log["intentos"].append(paso)
+                log["respuesta_final"] = paso["respuesta_final"]
+                return log
+            else:
+                # Preparar prompt para el siguiente intento
+                prompt = f"No se encontró información relevante con la consulta anterior.\n\nPregunta original: \"{pregunta}\"\nConsulta anterior: {plan}\nResultado anterior: (vacío o irrelevante)\n\nPor favor, reformula la consulta para intentar encontrar la información.\n\nEsquema: {campos}"
+                log["intentos"].append(paso)
+                time.sleep(0.5)
+        log["respuesta_final"] = "NO ENCONTRÉ INFORMACIÓN"
+        return log 
