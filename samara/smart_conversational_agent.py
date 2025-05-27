@@ -667,18 +667,18 @@ Responde de manera natural y útil:"""
 
 class SemanticQueryAgent:
     """
-    Agente LLM-driven: usa un LLM para razonar, formular y refinar la consulta a Weaviate.
+    Agente LLM-driven: usa un LLM (ahora OpenAI GPT-4) para razonar, formular y refinar la consulta a Weaviate.
     Reintenta hasta 3 veces si la respuesta no es relevante.
     """
-    def __init__(self, weaviate_client=None, ollama_url="http://localhost:11434"):
+    def __init__(self, weaviate_client=None):
         if weaviate_client is None:
             from .code_analysis_agent import CodeAnalysisAgent
             self.code_agent = CodeAnalysisAgent()
             self.weaviate_client = self.code_agent.weaviate_client
         else:
             self.weaviate_client = weaviate_client
-        self.ollama_url = ollama_url
         self._esquema_cache = None
+        self.model_router = ModelRouterAgent()
 
     def _get_schema(self):
         if self._esquema_cache is None:
@@ -686,19 +686,12 @@ class SemanticQueryAgent:
         return self._esquema_cache
 
     def _prompt_llm(self, prompt):
-        payload = {
-            "model": "llama3:instruct",
-            "prompt": prompt,
-            "stream": False
-        }
-        try:
-            response = requests.post(f"{self.ollama_url}/api/generate", json=payload)
-            if response.status_code == 200:
-                return response.json().get("response", "").strip()
-            else:
-                return f"[Error {response.status_code} al consultar Ollama]"
-        except Exception as e:
-            return f"[Error al conectar con Ollama: {e}]"
+        # Usar OpenAI GPT-4 para armar el plan JSON
+        result = self.model_router._call_gpt4(prompt, max_tokens=512, temperature=0)
+        if result["success"]:
+            return result["response"]
+        else:
+            return f"[Error llamando a OpenAI: {result.get('error', '')}]"
 
     def _parse_plan(self, llm_response):
         import json
@@ -714,7 +707,6 @@ class SemanticQueryAgent:
             return None
 
     def _ejecutar_plan(self, clase, plan):
-        # Soporta filtro por fileName, filePath, campo_objetivo, palabras_clave
         campo = plan.get("campo_objetivo", "summary")
         filtro = plan.get("filtro", {})
         palabras_clave = plan.get("palabras_clave", [])
@@ -725,7 +717,6 @@ class SemanticQueryAgent:
                 query = query.with_where({"operator": "Equal", "path": [k], "valueString": v})
         query = query.with_limit(10)
         result = query.do()
-        # Filtrar por palabras clave si es necesario
         if palabras_clave:
             objs = result['data']['Get'].get(clase, [])
             filtrados = []
@@ -740,27 +731,26 @@ class SemanticQueryAgent:
         objs = result['data']['Get'].get(clase, [])
         if not objs:
             return False
-        # Considera útil si hay contenido no vacío
         for obj in objs:
             if obj.get(campo, "").strip():
                 return True
         return False
 
     def consulta_inteligente(self, proyecto, pregunta, archivo=None):
+        import time
         log = {"intentos": []}
         clase = f"Project_{proyecto}"
         esquema = self._get_schema()
         campos = [p['name'] for c in esquema['classes'] if c['class'] == clase for p in c.get('properties', [])]
         prompt_base = f"""
-Usuario pregunta: "{pregunta}"
+Usuario pregunta: \"{pregunta}\"
 
 Esquema de Weaviate para el proyecto:
 {campos}
 
-Si la pregunta menciona un archivo, módulo o entidad, sugiere el campo y filtro adecuado.
-Devuélveme un JSON con:
+Devuélveme SOLO un JSON plano, sin explicaciones, sin comentarios, sin bloques múltiples. Solo un JSON válido con:
 - campo_objetivo: el campo más relevante para buscar
-- filtro: si hay que buscar por nombre de archivo, path, etc. (ejemplo: {{"fileName": "login.html"}})
+- filtro: si hay que buscar por nombre de archivo, path, etc. (ejemplo: {{\"fileName\": \"login.html\"}})
 - palabras_clave: si hay que buscar por keywords en el contenido
 - fallback: si no hay coincidencia, ¿qué hacer? (otro campo o estrategia)
 """
@@ -779,7 +769,6 @@ Devuélveme un JSON con:
             paso["respuesta_weaviate"] = result
             campo = plan.get("campo_objetivo", "summary")
             if self._respuesta_util(result, clase, campo):
-                # Sintetizar respuesta
                 objs = result['data']['Get'].get(clase, [])
                 if campo == "content":
                     contenidos = [obj.get("content", "") for obj in objs]
@@ -793,8 +782,7 @@ Devuélveme un JSON con:
                 log["respuesta_final"] = paso["respuesta_final"]
                 return log
             else:
-                # Preparar prompt para el siguiente intento
-                prompt = f"No se encontró información relevante con la consulta anterior.\n\nPregunta original: \"{pregunta}\"\nConsulta anterior: {plan}\nResultado anterior: (vacío o irrelevante)\n\nPor favor, reformula la consulta para intentar encontrar la información.\n\nEsquema: {campos}"
+                prompt = f"No se encontró información relevante con la consulta anterior.\n\nPregunta original: \"{pregunta}\"\nConsulta anterior: {plan}\nResultado anterior: (vacío o irrelevante)\n\nDevuélveme SOLO un JSON plano, sin explicaciones, sin comentarios, sin bloques múltiples. Solo un JSON válido con:\n- campo_objetivo: el campo más relevante para buscar\n- filtro: si hay que buscar por nombre de archivo, path, etc. (ejemplo: {{\"fileName\": \"login.html\"}})\n- palabras_clave: si hay que buscar por keywords en el contenido\n- fallback: si no hay coincidencia, ¿qué hacer? (otro campo o estrategia)\n\nEsquema: {campos}"
                 log["intentos"].append(paso)
                 time.sleep(0.5)
         log["respuesta_final"] = "NO ENCONTRÉ INFORMACIÓN"
