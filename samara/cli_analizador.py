@@ -14,7 +14,7 @@ from code_analysis_agent import CodeAnalysisAgent
 
 def detect_optimal_config():
     """Detecta la configuración óptima basada en el hardware"""
-    cpu_count = os.cpu_count()
+    cpu_count = os.cpu_count() or 4  # Fallback a 4 si os.cpu_count() devuelve None
     memory_gb = psutil.virtual_memory().total / (1024**3)
     
     # Detectar si es un Ryzen 9 (aproximado basado en cores)
@@ -48,6 +48,7 @@ def detect_optimal_config():
 def setup_agent(max_workers=None, ollama_max_concurrent=2, file_timeout=60, ollama_timeout=30):
     """Inicializa el agente de análisis con configuración personalizable"""
     try:
+        print(f"🔧 Inicializando agente con max_workers={max_workers}, ollama_max_concurrent={ollama_max_concurrent}")
         agent = CodeAnalysisAgent(
             ollama_url="http://localhost:11434",
             weaviate_url="http://localhost:8080",
@@ -58,7 +59,10 @@ def setup_agent(max_workers=None, ollama_max_concurrent=2, file_timeout=60, olla
         )
         return agent
     except Exception as e:
+        import traceback
         print(f"❌ Error inicializando el agente: {e}")
+        print(f"📋 Traceback completo:")
+        traceback.print_exc()
         return None
 
 def cmd_analizar(args):
@@ -86,7 +90,7 @@ def cmd_analizar(args):
     force_schema = True
     try:
         existing_classes = [cls['class'] for cls in agent.weaviate_client.schema.get().get('classes', [])]
-        class_name = f"Project_{project_name}" if project_name.startswith("_") else f"Project_{project_name}"
+        class_name = f"CodeFragments_{agent._sanitize_project_name(project_name)}"
         if class_name in existing_classes:
             response = input(f"⚠️ Ya existe un proyecto llamado '{project_name}'. ¿Quieres sobreescribirlo? (s/N): ")
             if response.strip().lower() in ['s', 'sí', 'si', 'y', 'yes']:
@@ -111,11 +115,12 @@ def cmd_analizar(args):
         print(f"❌ Error: {result['error']}")
     else:
         print(f"\n✅ Análisis completado:")
-        print(f"   📊 {result['indexed_files']} archivos indexados")
-        print(f"   🔧 Tecnologías: {', '.join(result['technologies'])}")
-        print(f"   🏗️  Patrones: {', '.join(result['architecture_patterns'])}")
+        print(f"   📊 {result.get('indexed_fragments', 0)} fragmentos indexados")
+        print(f"   📁 {result.get('total_files', 0)} archivos procesados")
+        print(f"   🔧 Tecnologías: {', '.join(result.get('technologies', []))}")
+        print(f"   🏗️  Patrones: {', '.join(result.get('architecture_patterns', []))}")
         
-        if args.verbose:
+        if hasattr(args, 'verbose') and args.verbose:
             print(f"\n📋 Resumen del proyecto:")
             print(result.get('project_summary', 'No disponible'))
 

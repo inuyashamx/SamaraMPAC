@@ -32,14 +32,15 @@ class CodeAnalysisAgent:
         }
         
         # Configuración de threading personalizable
-        self.max_workers = max_workers or min(16, os.cpu_count())
+        cpu_count = os.cpu_count() or 4  # Fallback a 4 si os.cpu_count() devuelve None
+        self.max_workers = max_workers or min(16, cpu_count)
         self.file_timeout = file_timeout
         self.ollama_timeout = ollama_timeout
         
         # Threading y sincronización
         self._log_lock = threading.Lock()
         self._counter_lock = threading.Lock()
-        self._ollama_semaphore = threading.Semaphore(ollama_max_concurrent)
+        self._ollama_semaphore = threading.Semaphore(ollama_max_concurrent or 2)
         self._indexed_fragments_count = 0
         
         # Conectar a Weaviate
@@ -422,7 +423,9 @@ class CodeAnalysisAgent:
         
         # Si la función es muy larga, fragmentarla
         if len(content_lines) > self.max_function_lines:
-            return self._fragment_large_function(content_lines, start_line, function_name, file_path, module, language, framework)
+            # Para funciones largas, devolver el primer fragmento y agregar los demás a la lista
+            large_fragments = self._fragment_large_function(content_lines, start_line, function_name, file_path, module, language, framework)
+            return large_fragments[0] if large_fragments else None
         
         # Generar descripción
         description = self._generate_fragment_description(content, 'function', function_name)
@@ -587,8 +590,225 @@ Responde solo con la descripción, sin explicaciones adicionales."""
         return None
 
     def _extract_python_fragments(self, lines: List[str], file_path: str, module: str, language: str, framework: str) -> List[Dict]:
-        """Extrae fragmentos de Python (implementación básica)"""
+        """Extrae fragmentos de Python: funciones, clases, imports"""
+        fragments = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Funciones
+            if self._is_python_function_declaration(line):
+                fragment = self._extract_python_function_fragment(lines, i, file_path, module, language, framework)
+                if fragment:
+                    fragments.append(fragment)
+                    i = fragment['end_line']
+                    continue
+            
+            # Clases
+            elif self._is_python_class_declaration(line):
+                fragment = self._extract_python_class_fragment(lines, i, file_path, module, language, framework)
+                if fragment:
+                    fragments.append(fragment)
+                    i = fragment['end_line']
+                    continue
+            
+            # Imports importantes
+            elif self._is_python_important_import(line):
+                fragment = self._extract_python_import_fragment(lines, i, file_path, module, language, framework)
+                if fragment:
+                    fragments.append(fragment)
+            
+            i += 1
+        
+        return fragments
+
+    def _is_python_function_declaration(self, line: str) -> bool:
+        """Detecta declaraciones de función en Python"""
+        return re.match(r'^\s*def\s+\w+\s*\(', line) is not None
+
+    def _is_python_class_declaration(self, line: str) -> bool:
+        """Detecta declaraciones de clase en Python"""
+        return re.match(r'^\s*class\s+\w+', line) is not None
+
+    def _is_python_important_import(self, line: str) -> bool:
+        """Detecta imports importantes en Python"""
+        if line.startswith('import ') or line.startswith('from '):
+            # Ignorar imports de librerías muy comunes
+            common_libs = ['os', 'sys', 'json', 're', 'time', 'datetime']
+            return not any(lib in line.lower() for lib in common_libs)
+        return False
+
+    def _extract_python_function_fragment(self, lines: List[str], start_idx: int, file_path: str, module: str, language: str, framework: str) -> Dict:
+        """Extrae un fragmento de función Python"""
+        start_line = start_idx + 1  # 1-indexed
+        function_name = self._extract_python_function_name(lines[start_idx])
+        
+        # Encontrar el final de la función basado en indentación
+        end_idx = self._find_python_function_end(lines, start_idx)
+        end_line = end_idx + 1
+        
+        # Extraer contenido
+        content_lines = lines[start_idx:end_idx + 1]
+        content = '\n'.join(content_lines)
+        
+        # Si la función es muy larga, fragmentarla
+        if len(content_lines) > self.max_function_lines:
+            # Para funciones largas, devolver el primer fragmento y agregar los demás a la lista
+            large_fragments = self._fragment_large_function(content_lines, start_line, function_name, file_path, module, language, framework)
+            return large_fragments[0] if large_fragments else None
+        
+        # Generar descripción
+        description = self._generate_fragment_description(content, 'function', function_name)
+        
+        return {
+            'file_name': os.path.basename(file_path),
+            'file_path': file_path,
+            'type': 'function',
+            'function_name': function_name,
+            'parent_function': None,
+            'fragment_index': 0,
+            'start_line': start_line,
+            'end_line': end_line,
+            'content': content,
+            'description': description,
+            'module': module,
+            'language': language,
+            'framework': framework,
+            'complexity': self._estimate_complexity(content),
+            'dependencies': self._extract_dependencies_from_content(content),
+            'parameters': self._extract_python_function_parameters(lines[start_idx]),
+            'return_type': self._extract_python_return_type(content)
+        }
+
+    def _extract_python_class_fragment(self, lines: List[str], start_idx: int, file_path: str, module: str, language: str, framework: str) -> Dict:
+        """Extrae un fragmento de clase Python"""
+        start_line = start_idx + 1  # 1-indexed
+        class_name = self._extract_python_class_name(lines[start_idx])
+        
+        # Encontrar el final de la clase basado en indentación
+        end_idx = self._find_python_class_end(lines, start_idx)
+        end_line = end_idx + 1
+        
+        # Extraer contenido
+        content_lines = lines[start_idx:end_idx + 1]
+        content = '\n'.join(content_lines)
+        
+        # Generar descripción
+        description = self._generate_fragment_description(content, 'class', class_name)
+        
+        return {
+            'file_name': os.path.basename(file_path),
+            'file_path': file_path,
+            'type': 'class',
+            'function_name': class_name,
+            'parent_function': None,
+            'fragment_index': 0,
+            'start_line': start_line,
+            'end_line': end_line,
+            'content': content,
+            'description': description,
+            'module': module,
+            'language': language,
+            'framework': framework,
+            'complexity': self._estimate_complexity(content),
+            'dependencies': self._extract_dependencies_from_content(content),
+            'parameters': [],
+            'return_type': 'class'
+        }
+
+    def _extract_python_import_fragment(self, lines: List[str], start_idx: int, file_path: str, module: str, language: str, framework: str) -> Dict:
+        """Extrae un fragmento de import Python"""
+        line = lines[start_idx]
+        
+        return {
+            'file_name': os.path.basename(file_path),
+            'file_path': file_path,
+            'type': 'import',
+            'function_name': 'imports',
+            'parent_function': None,
+            'fragment_index': 0,
+            'start_line': start_idx + 1,
+            'end_line': start_idx + 1,
+            'content': line,
+            'description': f"Import statement: {line.strip()}",
+            'module': module,
+            'language': language,
+            'framework': framework,
+            'complexity': 'low',
+            'dependencies': [line.strip()],
+            'parameters': [],
+            'return_type': 'import'
+        }
+
+    def _find_python_function_end(self, lines: List[str], start_idx: int) -> int:
+        """Encuentra el final de una función Python basado en indentación"""
+        if start_idx >= len(lines):
+            return start_idx
+        
+        # Obtener la indentación base de la función
+        base_indent = len(lines[start_idx]) - len(lines[start_idx].lstrip())
+        
+        # Buscar el final basado en indentación
+        for i in range(start_idx + 1, len(lines)):
+            line = lines[i]
+            
+            # Líneas vacías o solo comentarios se ignoran
+            if not line.strip() or line.strip().startswith('#'):
+                continue
+            
+            # Si encontramos una línea con indentación igual o menor, hemos terminado
+            current_indent = len(line) - len(line.lstrip())
+            if current_indent <= base_indent:
+                return i - 1
+        
+        # Si llegamos al final del archivo
+        return len(lines) - 1
+
+    def _find_python_class_end(self, lines: List[str], start_idx: int) -> int:
+        """Encuentra el final de una clase Python basado en indentación"""
+        return self._find_python_function_end(lines, start_idx)
+
+    def _extract_python_function_name(self, line: str) -> str:
+        """Extrae el nombre de la función de la línea de declaración Python"""
+        match = re.search(r'def\s+(\w+)', line)
+        return match.group(1) if match else 'unknown_function'
+
+    def _extract_python_class_name(self, line: str) -> str:
+        """Extrae el nombre de la clase de la línea de declaración Python"""
+        match = re.search(r'class\s+(\w+)', line)
+        return match.group(1) if match else 'unknown_class'
+
+    def _extract_python_function_parameters(self, line: str) -> List[str]:
+        """Extrae parámetros de la función Python"""
+        match = re.search(r'def\s+\w+\s*\(([^)]*)\)', line)
+        if match:
+            params_str = match.group(1).strip()
+            if params_str:
+                # Dividir por comas y limpiar
+                params = [p.strip().split('=')[0].strip().split(':')[0].strip() for p in params_str.split(',')]
+                return [p for p in params if p and p != 'self']
         return []
+
+    def _extract_python_return_type(self, content: str) -> str:
+        """Intenta detectar el tipo de retorno en Python"""
+        # Buscar return statements
+        returns = re.findall(r'return\s+([^#\n]+)', content)
+        if returns:
+            first_return = returns[0].strip()
+            if first_return.startswith('{') or 'dict(' in first_return:
+                return 'dict'
+            elif first_return.startswith('[') or 'list(' in first_return:
+                return 'list'
+            elif first_return.startswith('"') or first_return.startswith("'"):
+                return 'str'
+            elif first_return.isdigit():
+                return 'int'
+            elif first_return in ['True', 'False']:
+                return 'bool'
+            elif first_return == 'None':
+                return 'None'
+        return 'unknown'
 
     def _extract_html_fragments(self, lines: List[str], file_path: str, module: str, language: str, framework: str) -> List[Dict]:
         """Extrae fragmentos de HTML (implementación básica)"""
