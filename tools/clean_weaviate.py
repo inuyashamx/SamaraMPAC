@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Script para limpiar Weaviate - Compatible con el nuevo sistema de fragmentos
+Herramienta para limpiar datos de Weaviate
 """
 
-import weaviate
 import sys
 import os
-
-# Agregar el directorio padre al path para importar samara
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from samara.code_analysis_agent import CodeAnalysisAgent
+from agentes.indexador_fragmentos import CodeAnalysisAgent
 
 def clean_weaviate_completely():
     """

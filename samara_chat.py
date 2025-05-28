@@ -1,7 +1,12 @@
+#!/usr/bin/env python3
+"""
+Chat interactivo con Samara - Sistema de consulta de fragmentos de código
+"""
+
 import sys
 import os
 import json
-from samara.smart_conversational_agent import FragmentQueryAgent
+from agentes.consultor_fragmentos import FragmentQueryAgent
 
 # Determinar perfil (por argumento o default a 'dev')
 modo = sys.argv[1] if len(sys.argv) > 1 else "dev"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 CLI para el analizador de código con fragmentos en Weaviate
-Uso: python cli_analizador.py <comando> [argumentos]
+Uso: python analizador_codigo.py <comando> [argumentos]
 """
 
 import sys
@@ -10,7 +10,7 @@ import json
 import os
 import psutil
 from pathlib import Path
-from code_analysis_agent import CodeAnalysisAgent
+from agentes.indexador_fragmentos import CodeAnalysisAgent
 
 def detect_optimal_config():
     """Detecta la configuración óptima basada en el hardware"""
@@ -226,13 +226,13 @@ def cmd_detectar(args):
     print("🔧 **COMANDOS LISTOS PARA USAR:**")
     print()
     print("# Configuración conservadora:")
-    print(f"python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --workers {config['conservative_workers']} --ollama_concurrent {max(2, config['recommended_ollama']-1)}")
+    print(f"python analizador_codigo.py analizar /ruta/proyecto --workers {config['conservative_workers']} --ollama_concurrent {max(2, config['recommended_ollama']-1)}")
     print()
     print("# Configuración recomendada:")
-    print(f"python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --workers {config['recommended_workers']} --ollama_concurrent {config['recommended_ollama']}")
+    print(f"python analizador_codigo.py analizar /ruta/proyecto --workers {config['recommended_workers']} --ollama_concurrent {config['recommended_ollama']}")
     print()
     print("# Configuración agresiva:")
-    print(f"python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --workers {config['aggressive_workers']} --ollama_concurrent {min(8, config['recommended_ollama']+1)}")
+    print(f"python analizador_codigo.py analizar /ruta/proyecto --workers {config['aggressive_workers']} --ollama_concurrent {min(8, config['recommended_ollama']+1)}")
     print()
     
     print("💡 **CONSEJOS:**")
@@ -294,40 +294,30 @@ def main():
 Ejemplos de uso:
 
   # ¡NUEVO! Detectar configuración óptima para tu hardware
-  python samara/cli_analizador.py detectar
+  python analizador_codigo.py detectar
 
   # Analizar un proyecto (configuración por defecto)
-  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp
+  python analizador_codigo.py analizar C:/MisProyectos/MiApp --name MiApp
 
   # Analizar con configuración personalizada de multihilos
-  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --workers 8 --ollama_concurrent 4
+  python analizador_codigo.py analizar C:/MisProyectos/MiApp --name MiApp --workers 8 --ollama_concurrent 4
 
   # Analizar con timeouts personalizados
-  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --file_timeout 120 --ollama_timeout 60
+  python analizador_codigo.py analizar C:/MisProyectos/MiApp --name MiApp --file_timeout 120 --ollama_timeout 60
 
   # Analizar con logs detallados
-  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --verbose
+  python analizador_codigo.py analizar C:/MisProyectos/MiApp --name MiApp --verbose
 
   # Analizar generando archivos de log separados
-  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --logfile
+  python analizador_codigo.py analizar C:/MisProyectos/MiApp --name MiApp --log_files
 
-  # Consultar fragmentos
-  python samara/cli_analizador.py consultar MiApp "funciones de autenticación"
+  # Consultar fragmentos después de indexar
+  python samara_chat.py
 
-  # Listar fragmentos
-  python samara/cli_analizador.py listar MiApp
-
-  # Verificar fragmentos indexados
-  python samara/cli_analizador.py verificar_indexado MiApp
-
-  # Eliminar proyecto
-  python samara/cli_analizador.py eliminar MiApp
-
-Opciones de multihilos:
-  --workers N              : Número de threads para procesar archivos (default: min(16, CPU_count))
-  --ollama_concurrent N    : Conexiones simultáneas a Ollama (default: 2)
-  --file_timeout N         : Timeout en segundos por archivo (default: 60)
-  --ollama_timeout N       : Timeout en segundos para Ollama (default: 30)
+Configuración recomendada:
+  1. Ejecuta 'detectar' para ver la configuración óptima
+  2. Usa esa configuración para 'analizar' tu proyecto
+  3. Consulta con 'samara_chat.py' para interactuar con los fragmentos
         """
     )
     

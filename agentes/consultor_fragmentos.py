@@ -1,11 +1,16 @@
+#!/usr/bin/env python3
+"""
+Agente conversacional inteligente para consultas sobre fragmentos de código
+"""
+
 import os
 import json
 import requests
 import re
 from typing import List, Dict, Optional
-from .model_router_agent import ModelRouterAgent, TaskType, ModelProvider
+from .router_ia import ModelRouterAgent, TaskType, ModelProvider
 from datetime import datetime
-from .code_analysis_agent import CodeAnalysisAgent
+from .indexador_fragmentos import CodeAnalysisAgent
 import time
 import unicodedata
 
@@ -17,7 +22,7 @@ class FragmentQueryAgent:
     
     def __init__(self, weaviate_client=None):
         if weaviate_client is None:
-            from .code_analysis_agent import CodeAnalysisAgent
+            from .indexador_fragmentos import CodeAnalysisAgent
             self.code_agent = CodeAnalysisAgent()
             self.weaviate_client = self.code_agent.weaviate_client
         else:
