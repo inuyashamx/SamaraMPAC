@@ -1141,12 +1141,168 @@ Responde solo con la descripción, sin explicaciones adicionales."""
 
     # Métodos de consulta (implementación básica)
     def query_project(self, project_name: str, query: str, limit: int = 20) -> Dict:
-        """Consulta fragmentos del proyecto"""
-        return {"error": "Método de consulta no implementado aún"}
+        """Consulta fragmentos del proyecto usando búsqueda semántica"""
+        if not self.weaviate_client:
+            return {"error": "Cliente Weaviate no disponible"}
+        
+        class_name = f"CodeFragments_{self._sanitize_project_name(project_name)}"
+        
+        try:
+            # Generar embedding de la consulta
+            query_embedding = self._get_embedding(query)
+            if not query_embedding:
+                return {"error": "No se pudo generar embedding para la consulta"}
+            
+            # Búsqueda semántica en fragmentos
+            result = (
+                self.weaviate_client.query
+                .get(class_name, [
+                    'fileName', 'filePath', 'type', 'functionName', 'startLine', 'endLine',
+                    'content', 'description', 'module', 'language', 'framework', 'complexity'
+                ])
+                .with_near_vector({"vector": query_embedding})
+                .with_limit(limit)
+                .do()
+            )
+            
+            if 'data' in result and 'Get' in result['data'] and class_name in result['data']['Get']:
+                fragments = result['data']['Get'][class_name]
+                
+                # Preparar contexto para IA
+                context = self._prepare_fragments_context(fragments, query)
+                
+                # Generar respuesta usando IA
+                ai_response = self._generate_ai_response(query, context)
+                
+                return {
+                    "success": True,
+                    "query": query,
+                    "fragments_found": len(fragments),
+                    "fragments": fragments,
+                    "ai_response": ai_response,
+                    "context": context
+                }
+            else:
+                return {
+                    "success": True,
+                    "query": query,
+                    "fragments_found": 0,
+                    "fragments": [],
+                    "ai_response": f"No se encontraron fragmentos relevantes para '{query}' en el proyecto {project_name}."
+                }
+                
+        except Exception as e:
+            return {"error": f"Error en consulta: {e}"}
 
     def list_project_modules(self, project_name: str) -> Dict:
-        """Lista módulos del proyecto"""
-        return {"error": "Método de listado no implementado aún"}
+        """Lista módulos del proyecto agrupados por tipo"""
+        if not self.weaviate_client:
+            return {"error": "Cliente Weaviate no disponible"}
+        
+        class_name = f"CodeFragments_{self._sanitize_project_name(project_name)}"
+        
+        try:
+            # Obtener todos los fragmentos
+            result = (
+                self.weaviate_client.query
+                .get(class_name, [
+                    'fileName', 'filePath', 'type', 'functionName', 'module', 
+                    'language', 'complexity', 'startLine', 'endLine'
+                ])
+                .with_limit(1000)  # Límite alto para obtener todos
+                .do()
+            )
+            
+            if 'data' in result and 'Get' in result['data'] and class_name in result['data']['Get']:
+                fragments = result['data']['Get'][class_name]
+                
+                # Agrupar por tipo
+                modules_by_type = {}
+                for fragment in fragments:
+                    ftype = fragment.get('type', 'unknown')
+                    if ftype not in modules_by_type:
+                        modules_by_type[ftype] = []
+                    modules_by_type[ftype].append(fragment)
+                
+                # Estadísticas
+                total_fragments = len(fragments)
+                languages = set(f.get('language', 'unknown') for f in fragments)
+                modules = set(f.get('module', 'unknown') for f in fragments)
+                
+                return {
+                    "success": True,
+                    "project_name": project_name,
+                    "total_fragments": total_fragments,
+                    "modules_by_type": modules_by_type,
+                    "languages": list(languages),
+                    "modules": list(modules),
+                    "all_modules": fragments  # Para compatibilidad
+                }
+            else:
+                return {
+                    "success": True,
+                    "project_name": project_name,
+                    "total_fragments": 0,
+                    "modules_by_type": {},
+                    "languages": [],
+                    "modules": [],
+                    "all_modules": []
+                }
+                
+        except Exception as e:
+            return {"error": f"Error listando módulos: {e}"}
+
+    def _prepare_fragments_context(self, fragments: List[Dict], query: str) -> str:
+        """Prepara contexto estructurado con los fragmentos encontrados"""
+        if not fragments:
+            return "No se encontraron fragmentos relevantes."
+        
+        context = f"=== FRAGMENTOS RELEVANTES PARA: '{query}' ===\n\n"
+        
+        for i, fragment in enumerate(fragments[:10], 1):  # Limitar a 10 para no saturar
+            context += f"FRAGMENTO {i}:\n"
+            context += f"  📁 Archivo: {fragment.get('fileName', 'N/A')}\n"
+            context += f"  📍 Ubicación: {fragment.get('filePath', 'N/A')} (líneas {fragment.get('startLine', 'N/A')}-{fragment.get('endLine', 'N/A')})\n"
+            context += f"  🏷️  Tipo: {fragment.get('type', 'N/A')}\n"
+            context += f"  🔧 Función/Clase: {fragment.get('functionName', 'N/A')}\n"
+            context += f"  📦 Módulo: {fragment.get('module', 'N/A')}\n"
+            context += f"  💻 Lenguaje: {fragment.get('language', 'N/A')}\n"
+            context += f"  📊 Complejidad: {fragment.get('complexity', 'N/A')}\n"
+            context += f"  📝 Descripción: {fragment.get('description', 'N/A')}\n"
+            
+            # Mostrar contenido truncado
+            content = fragment.get('content', '')
+            if len(content) > 300:
+                content = content[:300] + "..."
+            context += f"  💾 Contenido:\n{content}\n"
+            context += f"  {'-' * 50}\n\n"
+        
+        if len(fragments) > 10:
+            context += f"... y {len(fragments) - 10} fragmentos más.\n"
+        
+        return context
+
+    def _generate_ai_response(self, query: str, context: str) -> str:
+        """Genera respuesta usando IA basada en el contexto de fragmentos"""
+        prompt = f"""Eres un asistente experto en análisis de código. Un usuario ha hecho la siguiente consulta sobre un proyecto de software:
+
+CONSULTA DEL USUARIO: "{query}"
+
+FRAGMENTOS DE CÓDIGO RELEVANTES ENCONTRADOS:
+{context}
+
+Tu tarea es:
+1. Analizar los fragmentos de código encontrados
+2. Responder la consulta del usuario de manera clara y estructurada
+3. Proporcionar ejemplos específicos del código cuando sea relevante
+4. Explicar cómo los fragmentos se relacionan con la consulta
+5. Dar recomendaciones o insights útiles si es apropiado
+
+Responde en español de manera técnica pero comprensible. Si no hay fragmentos relevantes, explica qué se podría buscar en su lugar.
+
+RESPUESTA:"""
+
+        return self._consultar_ollama(prompt)
 
     def delete_project_data(self, project_name: str) -> bool:
         """Elimina datos del proyecto"""

@@ -137,18 +137,20 @@ def cmd_consultar(args):
     if "error" in result:
         print(f"❌ Error: {result['error']}")
     else:
-        print(f"\n📄 Archivos encontrados: {result['files_found']}")
+        print(f"\n📄 Fragmentos encontrados: {result.get('fragments_found', 0)}")
         print(f"\n🤖 Respuesta:")
         print(result.get('ai_response', 'No disponible'))
         
-        if args.verbose and result.get('results'):
-            print(f"\n📋 Detalles de archivos encontrados:")
-            for i, file_data in enumerate(result['results'], 1):
-                print(f"\n{i}. {file_data.get('fileName', 'Sin nombre')}")
-                print(f"   📁 Ruta: {file_data.get('filePath', 'N/A')}")
-                print(f"   🏷️  Tipo: {file_data.get('moduleType', 'N/A')}")
-                print(f"   🔧 Tecnología: {file_data.get('technology', 'N/A')}")
-                print(f"   📊 Complejidad: {file_data.get('complexity', 'N/A')}")
+        if args.verbose and result.get('fragments'):
+            print(f"\n📋 Detalles de fragmentos encontrados:")
+            for i, fragment in enumerate(result['fragments'], 1):
+                print(f"\n{i}. {fragment.get('functionName', 'Sin nombre')} ({fragment.get('type', 'N/A')})")
+                print(f"   📁 Archivo: {fragment.get('fileName', 'N/A')}")
+                print(f"   📍 Ubicación: {fragment.get('filePath', 'N/A')} (líneas {fragment.get('startLine', 'N/A')}-{fragment.get('endLine', 'N/A')})")
+                print(f"   📦 Módulo: {fragment.get('module', 'N/A')}")
+                print(f"   💻 Lenguaje: {fragment.get('language', 'N/A')}")
+                print(f"   📊 Complejidad: {fragment.get('complexity', 'N/A')}")
+                print(f"   📝 Descripción: {fragment.get('description', 'N/A')}")
 
 def cmd_listar(args):
     """Comando: listar módulos del proyecto"""
@@ -156,26 +158,36 @@ def cmd_listar(args):
     if not agent:
         return
     
-    print(f"📋 Listando módulos del proyecto: {args.project}")
+    print(f"📋 Listando fragmentos del proyecto: {args.project}")
     
     result = agent.list_project_modules(args.project)
     
     if "error" in result:
         print(f"❌ Error: {result['error']}")
     else:
-        print(f"\n📊 Total de módulos: {result['total_modules']}")
+        print(f"\n📊 Total de fragmentos: {result.get('total_fragments', 0)}")
+        print(f"💻 Lenguajes: {', '.join(result.get('languages', []))}")
+        print(f"📦 Módulos: {', '.join(result.get('modules', []))}")
         
-        for module_type, files in result.get('modules_by_type', {}).items():
-            print(f"\n📁 {module_type.upper()}: {len(files)} archivos")
+        modules_by_type = result.get('modules_by_type', {})
+        for fragment_type, fragments in modules_by_type.items():
+            print(f"\n📁 {fragment_type.upper()}: {len(fragments)} fragmentos")
             
-            for file_data in files[:args.limit]:
-                complexity = file_data.get('complexity', 'unknown')
+            # Mostrar algunos ejemplos
+            for fragment in fragments[:args.limit]:
+                complexity = fragment.get('complexity', 'unknown')
                 emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(complexity, "⚪")
-                print(f"   {emoji} {file_data.get('fileName', 'Sin nombre')} ({complexity})")
+                function_name = fragment.get('functionName', 'Sin nombre')
+                file_name = fragment.get('fileName', 'N/A')
+                print(f"   {emoji} {function_name} en {file_name} ({complexity})")
                 
                 if args.verbose:
-                    print(f"      📁 {file_data.get('filePath', 'N/A')}")
-                    print(f"      🔧 {file_data.get('technology', 'N/A')}")
+                    print(f"      📁 {fragment.get('filePath', 'N/A')}")
+                    print(f"      📦 Módulo: {fragment.get('module', 'N/A')}")
+                    print(f"      💻 {fragment.get('language', 'N/A')}")
+            
+            if len(fragments) > args.limit:
+                print(f"   ... y {len(fragments) - args.limit} fragmentos más")
 
 def cmd_detectar(args):
     """Comando: detectar configuración óptima del hardware"""
@@ -251,21 +263,32 @@ def cmd_eliminar(args):
         print(f"❌ Error eliminando datos del proyecto '{args.project}'")
 
 def cmd_verificar_indexado(args):
-    """Comando: verificar archivos/módulos realmente indexados en el proyecto"""
+    """Comando: verificar fragmentos realmente indexados en el proyecto"""
     agent = setup_agent()
     if not agent:
         return
-    print(f"🔍 Verificando archivos indexados en el proyecto: {args.project}")
+    
+    print(f"🔍 Verificando fragmentos indexados en el proyecto: {args.project}")
+    
     result = agent.list_project_modules(args.project)
+    
     if "error" in result:
         print(f"❌ Error: {result['error']}")
     else:
-        mods = result.get('all_modules', [])
-        print(f"\n📦 Total módulos indexados: {len(mods)}\n")
-        for i, mod in enumerate(mods, 1):
-            print(f"{i}. {mod.get('fileName', 'Sin nombre')} | {mod.get('filePath', 'N/A')} | Tipo: {mod.get('artifactType', 'N/A')} | Dominio: {mod.get('businessDomain', 'N/A')}")
-        if not mods:
-            print("No se encontraron módulos indexados en el proyecto.")
+        fragments = result.get('all_modules', [])
+        print(f"\n📦 Total fragmentos indexados: {len(fragments)}\n")
+        
+        for i, fragment in enumerate(fragments, 1):
+            function_name = fragment.get('functionName', 'Sin nombre')
+            file_path = fragment.get('filePath', 'N/A')
+            fragment_type = fragment.get('type', 'N/A')
+            module = fragment.get('module', 'N/A')
+            lines = f"{fragment.get('startLine', 'N/A')}-{fragment.get('endLine', 'N/A')}"
+            
+            print(f"{i}. {function_name} | {file_path} | Tipo: {fragment_type} | Módulo: {module} | Líneas: {lines}")
+        
+        if not fragments:
+            print("No se encontraron fragmentos indexados en el proyecto.")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -349,7 +372,7 @@ Opciones de multihilos:
     parser_eliminar.set_defaults(func=cmd_eliminar)
     
     # Comando: verificar_indexado
-    parser_verificar = subparsers.add_parser('verificar_indexado', help='Verificar archivos/módulos realmente indexados en el proyecto')
+    parser_verificar = subparsers.add_parser('verificar_indexado', help='Verificar fragmentos realmente indexados en el proyecto')
     parser_verificar.add_argument('project', help='Nombre del proyecto')
     parser_verificar.set_defaults(func=cmd_verificar_indexado)
     
