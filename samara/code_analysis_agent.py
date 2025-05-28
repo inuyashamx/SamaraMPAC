@@ -1102,26 +1102,104 @@ Responde solo con la descripción, sin explicaciones adicionales."""
         }
         return result
 
-    # Métodos auxiliares que necesitan implementación básica
     def _setup_log_files(self, base_path: str, project_name: str, clear_existing: bool = False):
-        """Configuración básica de archivos de log"""
-        pass
+        """Configuración de archivos de log"""
+        if not os.path.exists(base_path):
+            os.makedirs(base_path)
+        
+        self._log_files = {
+            "ignored": os.path.join(base_path, f"{project_name}_ignored.log"),
+            "not_indexed": os.path.join(base_path, f"{project_name}_not_indexed.log"),
+            "enabled": True
+        }
+        
+        # Limpiar archivos existentes si se solicita
+        if clear_existing:
+            for log_file in [self._log_files["ignored"], self._log_files["not_indexed"]]:
+                if os.path.exists(log_file):
+                    os.remove(log_file)
 
     def _log_to_file(self, log_type: str, message: str):
-        """Log básico a archivo"""
-        pass
+        """Log a archivo específico"""
+        if not self._log_files.get("enabled"):
+            return
+        
+        log_file = self._log_files.get(log_type)
+        if log_file:
+            try:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    f.write(f"[{timestamp}] {message}\n")
+            except Exception as e:
+                print(f"Error escribiendo log: {e}")
 
     def _finalize_log_files(self):
-        """Finalización básica de logs"""
-        pass
+        """Finalización de logs con resumen"""
+        if not self._log_files.get("enabled"):
+            return
+        
+        print(f"\n📋 Archivos de log generados:")
+        for log_type, log_file in self._log_files.items():
+            if log_type != "enabled" and os.path.exists(log_file):
+                with open(log_file, 'r', encoding='utf-8') as f:
+                    lines = f.readlines()
+                print(f"   📄 {log_type}: {log_file} ({len(lines)} entradas)")
 
     def analyze_project_structure(self, project_path: str) -> Dict:
         """Análisis básico de estructura del proyecto"""
-        return {
+        structure = {
             "total_files": 0,
             "technologies_detected": [],
             "architecture_patterns": []
         }
+        
+        # Contar archivos y detectar tecnologías
+        tech_indicators = {
+            "javascript": [".js", ".jsx"],
+            "typescript": [".ts", ".tsx"],
+            "python": [".py"],
+            "html": [".html", ".htm"],
+            "css": [".css", ".scss", ".sass"],
+            "java": [".java"],
+            "csharp": [".cs"],
+            "php": [".php"],
+            "ruby": [".rb"],
+            "go": [".go"],
+            "rust": [".rs"],
+            "cpp": [".cpp", ".c"],
+            "vue": [".vue"]
+        }
+        
+        detected_techs = set()
+        
+        for root, dirs, files in os.walk(project_path):
+            # Ignorar directorios irrelevantes
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['node_modules', 'dist', 'build']]
+            
+            for file in files:
+                if not file.startswith('.'):
+                    structure["total_files"] += 1
+                    
+                    # Detectar tecnología por extensión
+                    file_ext = os.path.splitext(file)[1].lower()
+                    for tech, extensions in tech_indicators.items():
+                        if file_ext in extensions:
+                            detected_techs.add(tech)
+        
+        structure["technologies_detected"] = list(detected_techs)
+        
+        # Detectar patrones arquitectónicos básicos
+        patterns = []
+        if "javascript" in detected_techs or "typescript" in detected_techs:
+            patterns.append("frontend")
+        if "python" in detected_techs:
+            patterns.append("backend")
+        if "html" in detected_techs and "css" in detected_techs:
+            patterns.append("web")
+        
+        structure["architecture_patterns"] = patterns
+        
+        return structure
 
     def _consultar_ollama(self, prompt: str) -> str:
         """Consulta a Ollama para generar descripciones"""

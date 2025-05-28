@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CLI para el analizador de código con Weaviate
+CLI para el analizador de código con fragmentos en Weaviate
 Uso: python cli_analizador.py <comando> [argumentos]
 """
 
@@ -17,7 +17,7 @@ def detect_optimal_config():
     cpu_count = os.cpu_count() or 4  # Fallback a 4 si os.cpu_count() devuelve None
     memory_gb = psutil.virtual_memory().total / (1024**3)
     
-    # Detectar si es un Ryzen 9 (aproximado basado en cores)
+    # Detectar configuración según CPU
     if cpu_count >= 24:  # Ryzen 9 de alta gama (32 threads)
         recommended_workers = min(28, int(cpu_count * 0.85))
         recommended_ollama = min(8, max(4, cpu_count // 6))
@@ -66,7 +66,7 @@ def setup_agent(max_workers=None, ollama_max_concurrent=2, file_timeout=60, olla
         return None
 
 def cmd_analizar(args):
-    """Comando: analizar e indexar un proyecto"""
+    """Comando: analizar e indexar fragmentos de un proyecto"""
     agent = setup_agent(
         max_workers=getattr(args, 'workers', None),
         ollama_max_concurrent=getattr(args, 'ollama_concurrent', 2),
@@ -96,7 +96,7 @@ def cmd_analizar(args):
             if response.strip().lower() in ['s', 'sí', 'si', 'y', 'yes']:
                 force_schema = True
             else:
-                print("🔄 Reanudando indexación: solo se agregarán archivos nuevos.")
+                print("🔄 Reanudando indexación: solo se agregarán fragmentos nuevos.")
                 force_schema = False
     except Exception as e:
         print(f"⚠️ No se pudo verificar la existencia previa del proyecto: {e}")
@@ -119,13 +119,9 @@ def cmd_analizar(args):
         print(f"   📁 {result.get('total_files', 0)} archivos procesados")
         print(f"   🔧 Tecnologías: {', '.join(result.get('technologies', []))}")
         print(f"   🏗️  Patrones: {', '.join(result.get('architecture_patterns', []))}")
-        
-        if hasattr(args, 'verbose') and args.verbose:
-            print(f"\n📋 Resumen del proyecto:")
-            print(result.get('project_summary', 'No disponible'))
 
 def cmd_consultar(args):
-    """Comando: consultar información del proyecto"""
+    """Comando: consultar fragmentos del proyecto"""
     agent = setup_agent()
     if not agent:
         return
@@ -153,7 +149,7 @@ def cmd_consultar(args):
                 print(f"   📝 Descripción: {fragment.get('description', 'N/A')}")
 
 def cmd_listar(args):
-    """Comando: listar módulos del proyecto"""
+    """Comando: listar fragmentos del proyecto"""
     agent = setup_agent()
     if not agent:
         return
@@ -230,13 +226,13 @@ def cmd_detectar(args):
     print("🔧 **COMANDOS LISTOS PARA USAR:**")
     print()
     print("# Configuración conservadora:")
-    print(f"python cli_analizador.py analizar /ruta/proyecto --workers {config['conservative_workers']} --ollama_concurrent {max(2, config['recommended_ollama']-1)}")
+    print(f"python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --workers {config['conservative_workers']} --ollama_concurrent {max(2, config['recommended_ollama']-1)}")
     print()
     print("# Configuración recomendada:")
-    print(f"python cli_analizador.py analizar /ruta/proyecto --workers {config['recommended_workers']} --ollama_concurrent {config['recommended_ollama']}")
+    print(f"python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --workers {config['recommended_workers']} --ollama_concurrent {config['recommended_ollama']}")
     print()
     print("# Configuración agresiva:")
-    print(f"python cli_analizador.py analizar /ruta/proyecto --workers {config['aggressive_workers']} --ollama_concurrent {min(8, config['recommended_ollama']+1)}")
+    print(f"python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --workers {config['aggressive_workers']} --ollama_concurrent {min(8, config['recommended_ollama']+1)}")
     print()
     
     print("💡 **CONSEJOS:**")
@@ -292,37 +288,40 @@ def cmd_verificar_indexado(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Analizador de código con Weaviate",
+        description="Analizador de código con fragmentos en Weaviate",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos de uso:
 
   # ¡NUEVO! Detectar configuración óptima para tu hardware
-  python cli_analizador.py detectar
+  python samara/cli_analizador.py detectar
 
   # Analizar un proyecto (configuración por defecto)
-  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp
+  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp
 
   # Analizar con configuración personalizada de multihilos
-  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --workers 8 --ollama_concurrent 4
+  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --workers 8 --ollama_concurrent 4
 
   # Analizar con timeouts personalizados
-  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --file_timeout 120 --ollama_timeout 60
+  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --file_timeout 120 --ollama_timeout 60
 
-  # Analizar con logs detallados (archivos ignorados y chunks)
-  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --verbose
+  # Analizar con logs detallados
+  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --verbose
 
-  # Analizar generando archivos de log separados (en directorio "logs")
-  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --logfile
+  # Analizar generando archivos de log separados
+  python samara/cli_analizador.py analizar C:/MisProyectos/MiApp --name MiApp --logfile
 
-  # Consultar información
-  python cli_analizador.py consultar MiApp "dame un resumen del módulo login"
+  # Consultar fragmentos
+  python samara/cli_analizador.py consultar MiApp "funciones de autenticación"
 
-  # Listar módulos
-  python cli_analizador.py listar MiApp
+  # Listar fragmentos
+  python samara/cli_analizador.py listar MiApp
+
+  # Verificar fragmentos indexados
+  python samara/cli_analizador.py verificar_indexado MiApp
 
   # Eliminar proyecto
-  python cli_analizador.py eliminar MiApp
+  python samara/cli_analizador.py eliminar MiApp
 
 Opciones de multihilos:
   --workers N              : Número de threads para procesar archivos (default: min(16, CPU_count))
@@ -335,7 +334,7 @@ Opciones de multihilos:
     subparsers = parser.add_subparsers(dest='comando', help='Comandos disponibles')
     
     # Comando: analizar
-    parser_analizar = subparsers.add_parser('analizar', help='Analizar e indexar un proyecto')
+    parser_analizar = subparsers.add_parser('analizar', help='Analizar e indexar fragmentos de un proyecto')
     parser_analizar.add_argument('path', help='Ruta del proyecto a analizar')
     parser_analizar.add_argument('--name', help='Nombre del proyecto (opcional)')
     parser_analizar.add_argument('--verbose', '-v', action='store_true', help='Mostrar información detallada y logs de archivos procesados')
@@ -347,7 +346,7 @@ Opciones de multihilos:
     parser_analizar.set_defaults(func=cmd_analizar)
     
     # Comando: consultar
-    parser_consultar = subparsers.add_parser('consultar', help='Consultar información del proyecto')
+    parser_consultar = subparsers.add_parser('consultar', help='Consultar fragmentos del proyecto')
     parser_consultar.add_argument('project', help='Nombre del proyecto')
     parser_consultar.add_argument('query', help='Consulta a realizar')
     parser_consultar.add_argument('--limit', type=int, default=5, help='Límite de resultados (default: 5)')
@@ -355,9 +354,9 @@ Opciones de multihilos:
     parser_consultar.set_defaults(func=cmd_consultar)
     
     # Comando: listar
-    parser_listar = subparsers.add_parser('listar', help='Listar módulos del proyecto')
+    parser_listar = subparsers.add_parser('listar', help='Listar fragmentos del proyecto')
     parser_listar.add_argument('project', help='Nombre del proyecto')
-    parser_listar.add_argument('--limit', type=int, default=10, help='Límite de archivos por tipo (default: 10)')
+    parser_listar.add_argument('--limit', type=int, default=10, help='Límite de fragmentos por tipo (default: 10)')
     parser_listar.add_argument('--verbose', '-v', action='store_true', help='Mostrar información detallada')
     parser_listar.set_defaults(func=cmd_listar)
     
