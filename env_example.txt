@@ -1,21 +1,27 @@
 # Configuración de API Keys para Samara
-# Copia este archivo a .env y agrega tus claves reales
+# Copia este archivo como .env y configura las keys que tengas disponibles
 
-# Claude (Anthropic)
-CLAUDE_API_KEY=tu_claude_api_key_aqui
+# Claude (excelente para análisis de código)
+CLAUDE_API_KEY=
 
-# OpenAI (GPT-4)
+# OpenAI GPT-4 (recomendado para análisis avanzado)
 OPENAI_API_KEY=
 
-# Google Gemini
-GEMINI_API_KEY=tu_gemini_api_key_aqui
+# Google Gemini (buena relación calidad/precio)
+GEMINI_API_KEY=
 
-# Perplexity AI
-PERPLEXITY_API_KEY=tu_perplexity_api_key_aqui
+# Perplexity (bueno para consultas con contexto web)
+PERPLEXITY_API_KEY=
 
-# Weaviate (si usas Weaviate Cloud)
+# Configuración de Ollama (local - siempre usado para indexación)
+OLLAMA_URL=http://localhost:11434
+
+# Configuración de Weaviate (base de datos vectorial)
 WEAVIATE_URL=http://localhost:8080
-WEAVIATE_API_KEY=opcional_si_usas_weaviate_cloud
+WEAVIATE_API_KEY=
 
-# Configuración de Ollama (local)
-OLLAMA_URL=http://localhost:11434 
+# NOTAS:
+# - Ollama siempre se usa para indexación (gratis, local)
+# - Solo configura las API keys que tengas disponibles
+# - El sistema se adapta automáticamente a los proveedores disponibles
+# - Para contextos pequeños usa Ollama, para grandes usa el mejor proveedor disponible 

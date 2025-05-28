@@ -157,19 +157,49 @@ class ModelRouterAgent:
         Filtra las reglas de enrutamiento para incluir solo proveedores disponibles
         """
         available_providers = []
+        unavailable_providers = []
         
         # Verificar qué proveedores están realmente disponibles
         for provider in ModelProvider:
             if self._is_provider_available(provider):
                 available_providers.append(provider)
+            else:
+                unavailable_providers.append(provider)
         
-        print(f"🔍 Proveedores disponibles detectados: {[p.value for p in available_providers]}")
+        print(f"🔍 Verificando proveedores de IA...")
+        
+        # Mostrar proveedores disponibles
+        if available_providers:
+            print(f"✅ Proveedores disponibles: {[p.value for p in available_providers]}")
+            
+            if ModelProvider.OLLAMA in available_providers:
+                print("🏠 Ollama local disponible (gratis) - usado para indexación")
+            
+            cloud_providers = [p for p in available_providers if p != ModelProvider.OLLAMA]
+            if cloud_providers:
+                print(f"☁️ Proveedores cloud disponibles: {[p.value for p in cloud_providers]}")
+        
+        # Mostrar proveedores no disponibles
+        if unavailable_providers:
+            print(f"⚠️ Proveedores sin configurar: {[p.value for p in unavailable_providers]}")
+            
+            missing_keys = []
+            for provider in unavailable_providers:
+                if provider == ModelProvider.OLLAMA:
+                    print("   • Ollama: No está ejecutándose en http://localhost:11434")
+                else:
+                    key_name = f"{provider.value.upper()}_API_KEY"
+                    missing_keys.append(key_name)
+            
+            if missing_keys:
+                print(f"   • API keys faltantes: {', '.join(missing_keys)}")
+                print("   • Configúralas en el archivo .env para habilitar más opciones")
         
         # Si no hay proveedores disponibles, mostrar error
         if not available_providers:
             print("❌ ERROR: No hay proveedores de IA disponibles!")
             print("💡 Soluciones:")
-            print("   • Instala Ollama: curl -fsSL https://ollama.ai/install.sh | sh")
+            print("   • Instala y ejecuta Ollama: curl -fsSL https://ollama.ai/install.sh | sh")
             print("   • O configura API keys en el archivo .env")
             return
         
@@ -186,34 +216,60 @@ class ModelRouterAgent:
         
         # Mostrar configuración final
         print(f"✅ Sistema configurado con {len(available_providers)} proveedor(es)")
-        if ModelProvider.OLLAMA in available_providers:
-            print("🏠 Ollama local disponible (gratis)")
         
-        cloud_providers = [p for p in available_providers if p != ModelProvider.OLLAMA]
-        if cloud_providers:
-            print(f"☁️ Proveedores cloud: {[p.value for p in cloud_providers]}")
-        else:
-            print("⚠️ Solo Ollama disponible - considera agregar API keys para más opciones")
+        if len(available_providers) == 1 and ModelProvider.OLLAMA in available_providers:
+            print("💡 Solo Ollama disponible - perfecto para indexación, considera agregar API keys para análisis avanzado")
 
-    def route_and_query(self, prompt: str, task_type: Optional[TaskType] = None, mode: str = "default", context_size: int = 0) -> Dict:
+    def route_and_query(self, prompt: str, task_type: Optional[TaskType] = None, mode: str = "default", context_size: int = 0, max_tokens: int = 1024, temperature: float = 0.7) -> Dict:
         """
-        Redirige SIEMPRE a OpenAI (GPT-4), ignorando el resto de lógica y proveedores.
+        Enruta inteligentemente la consulta al mejor proveedor disponible según la tarea, contexto y disponibilidad.
         """
+        # Actualizar estadísticas totales
+        self.usage_stats["total_requests"] += 1
+        
         try:
-            provider = ModelProvider.GPT4
-            response = self._query_openai(prompt)
-            return {
-                "success": True,
-                "response": response,
-                "provider": provider.value,
-                "used_fallback": False
-            }
+            # 1. DETECTAR TIPO DE TAREA SI NO SE ESPECIFICA
+            if task_type is None:
+                task_type = self._detect_task_type(prompt, mode)
+            
+            # 2. ESTIMAR TAMAÑO DE CONTEXTO SI NO SE ESPECIFICA
+            if context_size == 0:
+                context_size = self._estimate_context_size(prompt)
+            
+            # 3. SELECCIONAR MEJOR PROVEEDOR
+            selected_provider = self._select_best_provider(task_type, prompt, context_size)
+            
+            # 4. EJECUTAR CON SISTEMA DE FALLBACK
+            result = self._execute_with_fallback(
+                provider=selected_provider,
+                prompt=prompt,
+                task_type=task_type,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                context_size=context_size
+            )
+            
+            # 5. ACTUALIZAR ESTADÍSTICAS
+            self._update_stats(selected_provider, task_type, result["success"], context_size)
+            
+            # 6. AGREGAR METADATA AL RESULTADO
+            result.update({
+                "task_type": task_type.value,
+                "context_size": context_size,
+                "selected_provider": selected_provider.value
+            })
+            
+            return result
+            
         except Exception as e:
+            # Error en el enrutamiento
+            self.usage_stats["errors"] += 1
             return {
                 "success": False,
-                "error": str(e),
-                "provider": "gpt4",
-                "used_fallback": False
+                "error": f"Error en enrutamiento: {str(e)}",
+                "provider": "none",
+                "task_type": task_type.value if task_type else "unknown",
+                "context_size": context_size
             }
 
     def _categorize_context_size(self, context_size: int) -> str:
@@ -247,7 +303,9 @@ class ModelRouterAgent:
             ],
             TaskType.ANALISIS_CODIGO: [
                 "analiza el proyecto", "analizar código", "estructura del proyecto",
-                "dependencias", "patrones", "arquitectura"
+                "dependencias", "patrones", "arquitectura", "fragmentos",
+                "funciones", "clases", "componentes", "módulos", "que hace",
+                "cómo funciona", "explicar código", "revisar código"
             ],
             TaskType.CONVERSACION_JUEGO: [
                 "puntaje", "nivel", "juego", "personaje", "historia",
@@ -255,15 +313,19 @@ class ModelRouterAgent:
             ],
             TaskType.DEBUGGING: [
                 "error", "bug", "problema", "no funciona", "falla",
-                "excepción", "debug"
+                "excepción", "debug", "arreglar", "solucionar"
             ],
             TaskType.DOCUMENTACION: [
                 "documenta", "explicar", "cómo funciona", "tutorial",
-                "guía", "readme"
+                "guía", "readme", "comentarios", "documentación"
             ],
             TaskType.ARQUITECTURA: [
                 "diseño", "arquitectura", "patrones", "estructura",
-                "escalabilidad", "performance"
+                "escalabilidad", "performance", "organización"
+            ],
+            TaskType.CONSULTA_SIMPLE: [
+                "qué es", "cuál es", "dónde está", "cuándo", "por qué",
+                "buscar", "encontrar", "mostrar", "listar"
             ]
         }
         
@@ -276,8 +338,8 @@ class ModelRouterAgent:
         if mode == "game":
             return TaskType.CONVERSACION_JUEGO
         elif mode == "dev":
-            # Si es dev pero no detectamos nada específico, asumir consulta simple
-            return TaskType.CONSULTA_SIMPLE
+            # Si es dev pero no detectamos nada específico, asumir análisis de código
+            return TaskType.ANALISIS_CODIGO
         
         return TaskType.CONSULTA_SIMPLE
 
@@ -290,7 +352,7 @@ class ModelRouterAgent:
         estimated_tokens = len(prompt) // 4
         
         # Ajustes por tipo de contenido
-        if any(keyword in prompt.lower() for keyword in ["código", "code", "función", "class", "import"]):
+        if any(keyword in prompt.lower() for keyword in ["código", "code", "función", "class", "import", "fragmentos"]):
             # El código tiende a tener más tokens por carácter
             estimated_tokens = int(estimated_tokens * 1.2)
         
@@ -426,8 +488,11 @@ class ModelRouterAgent:
             except:
                 return False
         else:
-            # Para proveedores cloud, verificar si hay API key
-            return config.get("api_key") is not None
+            # Para proveedores cloud, verificar si hay API key configurada
+            api_key = config.get("api_key")
+            if api_key is None or api_key.strip() == "":
+                return False
+            return True
 
     def _execute_with_fallback(self, 
                               provider: ModelProvider, 
@@ -712,3 +777,31 @@ class ModelRouterAgent:
         # Modificar todas las reglas para usar solo este proveedor
         for task_type in self.routing_rules:
             self.routing_rules[task_type] = [provider] 
+
+    # Métodos de conveniencia para casos comunes
+    def query_code_analysis(self, prompt: str, context_size: int = 0) -> Dict:
+        """Método de conveniencia para análisis de código"""
+        return self.route_and_query(
+            prompt=prompt,
+            task_type=TaskType.ANALISIS_CODIGO,
+            mode="dev",
+            context_size=context_size,
+            temperature=0.3  # Más determinístico para código
+        )
+    
+    def query_simple(self, prompt: str) -> Dict:
+        """Método de conveniencia para consultas simples"""
+        return self.route_and_query(
+            prompt=prompt,
+            task_type=TaskType.CONSULTA_SIMPLE,
+            temperature=0.7
+        )
+    
+    def query_documentation(self, prompt: str, context_size: int = 0) -> Dict:
+        """Método de conveniencia para documentación"""
+        return self.route_and_query(
+            prompt=prompt,
+            task_type=TaskType.DOCUMENTACION,
+            context_size=context_size,
+            temperature=0.5
+        ) 
