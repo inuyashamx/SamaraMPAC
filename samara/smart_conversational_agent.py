@@ -13,6 +13,7 @@ from .model_router_agent import ModelRouterAgent, TaskType, ModelProvider
 from datetime import datetime
 from .code_analysis_agent import CodeAnalysisAgent
 import time
+import unicodedata
 
 class SmartConversationalAgent:
     """
@@ -665,10 +666,53 @@ Responde de manera natural y útil:"""
         
         print("\n=== FIN DEBUG ===")
 
+class PromptGeneratorAgent:
+    """
+    Agente LLM-driven que genera prompts específicos para el LLM final, según la intención de la pregunta y el contexto.
+    """
+    def __init__(self):
+        from .model_router_agent import ModelRouterAgent
+        self.model_router = ModelRouterAgent()
+
+    def generar_prompt(self, pregunta_usuario, contexto, esquema):
+        prompt = f"""
+Eres un analista de código especializado. Te han proporcionado datos específicos de un proyecto de software extraídos de una base de datos.
+
+DATOS ESPECÍFICOS DEL PROYECTO:
+{contexto}
+
+PREGUNTA DEL USUARIO:
+{pregunta_usuario}
+
+INSTRUCCIONES PARA EL ANÁLISIS:
+- Analiza INTELIGENTEMENTE los datos proporcionados
+- Identifica patrones en rutas de archivos (ej: src/views/conteoFisico/ indica módulo de conteo físico)
+- Reconoce que archivos en la misma carpeta suelen ser parte del mismo módulo
+- Extrae información de funciones, clases, variables, imports, exports cuando sea relevante
+- Si encuentras archivos relacionados con el tema preguntado, analízalos aunque no mencionen explícitamente el nombre
+- Estructura tu respuesta de manera organizada y técnica
+- Incluye detalles específicos como nombres de funciones, componentes, rutas, etc.
+- NO digas "no se menciona" si hay archivos claramente relacionados por ruta o contenido
+
+CRITERIOS DE RELEVANCIA:
+- Rutas que contengan palabras clave de la pregunta son MUY relevantes
+- Archivos con funciones/clases relacionadas son relevantes
+- Componentes en la misma carpeta suelen trabajar juntos
+- Imports/exports muestran dependencias entre módulos
+
+Analiza el contexto y responde de manera específica y detallada basándote en los datos reales del proyecto.
+"""
+        result = self.model_router._call_gpt4(prompt, max_tokens=1024, temperature=0)
+        if result["success"]:
+            return result["response"].strip()
+        else:
+            return f"[Error analizando contexto: {result.get('error', '')}]"
+
 class SemanticQueryAgent:
     """
     Agente LLM-driven: usa un LLM (ahora OpenAI GPT-4) para razonar, formular y refinar la consulta a Weaviate.
     Reintenta hasta 3 veces si la respuesta no es relevante.
+    Usa PromptGeneratorAgent para crear prompts específicos según la intención.
     """
     def __init__(self, weaviate_client=None):
         if weaviate_client is None:
@@ -679,6 +723,7 @@ class SemanticQueryAgent:
             self.weaviate_client = weaviate_client
         self._esquema_cache = None
         self.model_router = ModelRouterAgent()
+        self.prompt_generator = PromptGeneratorAgent()
 
     def _get_schema(self):
         if self._esquema_cache is None:
@@ -686,8 +731,7 @@ class SemanticQueryAgent:
         return self._esquema_cache
 
     def _prompt_llm(self, prompt):
-        # Usar OpenAI GPT-4 para armar el plan JSON
-        result = self.model_router._call_gpt4(prompt, max_tokens=512, temperature=0)
+        result = self.model_router._call_gpt4(prompt, max_tokens=1024, temperature=0)
         if result["success"]:
             return result["response"]
         else:
@@ -696,7 +740,6 @@ class SemanticQueryAgent:
     def _parse_plan(self, llm_response):
         import json
         try:
-            # Buscar el primer bloque JSON en la respuesta
             start = llm_response.find('{')
             end = llm_response.rfind('}') + 1
             if start != -1 and end != -1:
@@ -736,54 +779,178 @@ class SemanticQueryAgent:
                 return True
         return False
 
+    def _extraer_componentes_llm(self, codigo, pregunta_usuario):
+        prompt = f"""
+Analiza el siguiente código fuente y extrae una lista de los componentes principales que lo conforman.
+Componentes pueden ser: funciones, clases, módulos, tags Polymer, templates, elementos HTML personalizados, etc.
+
+Pregunta original del usuario: "{pregunta_usuario}"
+
+Código:
+{codigo}
+
+Devuélveme una lista clara y estructurada de los componentes encontrados, con una breve descripción de cada uno. Responde en español.
+"""
+        return self._prompt_llm(prompt)
+
     def consulta_inteligente(self, proyecto, pregunta, archivo=None):
         import time
-        log = {"intentos": []}
-        clase = f"Project_{proyecto}"
+        log = {"estrategia": "busqueda_hibrida", "intentos": []}
+        clase = f"CodeMetadata_{proyecto}"
         esquema = self._get_schema()
         campos = [p['name'] for c in esquema['classes'] if c['class'] == clase for p in c.get('properties', [])]
-        prompt_base = f"""
-Usuario pregunta: \"{pregunta}\"
 
-Esquema de Weaviate para el proyecto:
-{campos}
+        # Paso 0: Usar LLM para extraer el término clave de la pregunta
+        prompt_extraccion = f"""
+Eres un asistente experto en búsqueda de código. Dada la siguiente pregunta de usuario, extrae SOLO el término o términos clave que mejor describen el módulo, archivo o funcionalidad que el usuario quiere buscar. No incluyas palabras genéricas como 'qué', 'tienes', 'de', 'hay', 'módulo', 'modulo', 'archivos', 'tiene', 'dame', etc. Si hay más de un término relevante, sepáralos por coma. Si no hay término claro, responde solo con la pregunta original.
 
-Devuélveme SOLO un JSON plano, sin explicaciones, sin comentarios, sin bloques múltiples. Solo un JSON válido con:
-- campo_objetivo: el campo más relevante para buscar
-- filtro: si hay que buscar por nombre de archivo, path, etc. (ejemplo: {{\"fileName\": \"login.html\"}})
-- palabras_clave: si hay que buscar por keywords en el contenido
-- fallback: si no hay coincidencia, ¿qué hacer? (otro campo o estrategia)
+Pregunta del usuario:
+"{pregunta}"
+
+Término(s) clave para buscar:
 """
-        prompt = prompt_base
-        for intento in range(1, 4):
-            paso = {"intento": intento, "prompt": prompt}
-            llm_response = self._prompt_llm(prompt)
-            paso["plan_llm"] = llm_response
-            plan = self._parse_plan(llm_response)
-            if not plan:
-                paso["error"] = "No se pudo parsear el plan del LLM"
-                log["intentos"].append(paso)
-                break
-            paso["plan_parseado"] = plan
-            result = self._ejecutar_plan(clase, plan)
-            paso["respuesta_weaviate"] = result
-            campo = plan.get("campo_objetivo", "summary")
-            if self._respuesta_util(result, clase, campo):
-                objs = result['data']['Get'].get(clase, [])
-                if campo == "content":
-                    contenidos = [obj.get("content", "") for obj in objs]
-                    paso["respuesta_final"] = "\n\n".join(contenidos[:3])[:2000] + ("..." if len(contenidos) > 3 else "")
-                else:
-                    res = []
-                    for obj in objs:
-                        res.append(f"Archivo: {obj.get('fileName')}\n{campo}: {obj.get(campo, '')[:300]}\n---")
-                    paso["respuesta_final"] = "\n".join(res)
-                log["intentos"].append(paso)
-                log["respuesta_final"] = paso["respuesta_final"]
+        termino_llm = self._prompt_llm(prompt_extraccion).strip().replace('"','')
+        if not termino_llm or len(termino_llm) < 2:
+            termino_llm = pregunta
+        print(f"[DEPURACIÓN] Término(s) clave extraído(s) por LLM: '{termino_llm}'")
+
+        # Normalizar la(s) palabra(s) clave extraída(s)
+        pregunta_normalizada = self._normalizar_texto(termino_llm)
+        palabras_normalizadas = [w for w in pregunta_normalizada.split() if w]
+
+        campos_clave = ["fileName", "filePath", "businessDomain", "domainConcepts", "responsibilities"]
+
+        # 1. BÚSQUEDA EXACTA/LIKE POR FRASE COMPLETA NORMALIZADA
+        where_or_frase = {
+            "operator": "Or",
+            "operands": []
+        }
+        for campo in campos_clave:
+            where_or_frase["operands"].append({
+                "path": [campo],
+                "operator": "Like",
+                "valueString": f"*{pregunta_normalizada}*"
+            })
+        result_frase = (
+            self.weaviate_client.query
+            .get(clase, [
+                "fileName", "filePath", "artifactType", "architecturalLayer", "businessDomain", 
+                "responsibilities", "businessRules", "domainConcepts", "primaryPurpose", 
+                "aiGeneratedSummary", "semanticTags", "codeMetrics", "technologySpecific", 
+                "detectedFramework", "externalDependencies", "internalReferences", "lastModified"
+            ])
+            .with_where(where_or_frase)
+            .with_limit(20)
+            .do()
+        )
+        archivos_frase = []
+        if 'data' in result_frase and 'Get' in result_frase['data'] and clase in result_frase['data']['Get']:
+            archivos_frase = result_frase['data']['Get'][clase]
+        # Filtrar resultados normalizando los campos
+        archivos_frase_filtrados = []
+        for archivo in archivos_frase:
+            for campo in campos_clave:
+                valor = self._normalizar_texto(archivo.get(campo, ""))
+                if pregunta_normalizada in valor:
+                    archivos_frase_filtrados.append(archivo)
+                    break
+        if archivos_frase_filtrados:
+            print(f"[DEPURACIÓN] Búsqueda exacta (frase normalizada) encontró {len(archivos_frase_filtrados)} archivos relevantes:")
+            for i, archivo in enumerate(archivos_frase_filtrados, 1):
+                print(f"  {i}. {archivo.get('fileName', 'Sin nombre')} | {archivo.get('filePath', 'N/A')} | Tipo: {archivo.get('artifactType', 'N/A')} | Dominio: {archivo.get('businessDomain', 'N/A')}")
+            contexto = self._preparar_contexto_semantico(archivos_frase_filtrados)
+            prompt_llm = self.prompt_generator.generar_prompt(pregunta, contexto, campos)
+            print(f"\n[DEPURACIÓN] Prompt enviado al LLM (primeros 1000 caracteres, total {len(prompt_llm)}):\n")
+            print(prompt_llm[:1000] + ("..." if len(prompt_llm) > 1000 else ""))
+            respuesta_final = prompt_llm
+            log["respuesta_final"] = respuesta_final
+            log["estrategia_exitosa"] = "busqueda_exacta_frase_normalizada"
+            return log
+
+        # 2. BÚSQUEDA POR PALABRAS CLAVE NORMALIZADAS (todas deben estar en algún campo)
+        if palabras_normalizadas:
+            where_or = {
+                "operator": "Or",
+                "operands": []
+            }
+            for campo in campos_clave:
+                for palabra in palabras_normalizadas:
+                    where_or["operands"].append({
+                        "path": [campo],
+                        "operator": "Like",
+                        "valueString": f"*{palabra}*"
+                    })
+            result_exacto = (
+                self.weaviate_client.query
+                .get(clase, [
+                    "fileName", "filePath", "artifactType", "architecturalLayer", "businessDomain", 
+                    "responsibilities", "businessRules", "domainConcepts", "primaryPurpose", 
+                    "aiGeneratedSummary", "semanticTags", "codeMetrics", "technologySpecific", 
+                    "detectedFramework", "externalDependencies", "internalReferences", "lastModified"
+                ])
+                .with_where(where_or)
+                .with_limit(30)
+                .do()
+            )
+            archivos_exactos = []
+            if 'data' in result_exacto and 'Get' in result_exacto['data'] and clase in result_exacto['data']['Get']:
+                archivos_exactos = result_exacto['data']['Get'][clase]
+            # Filtrar: solo archivos donde todas las palabras estén presentes en algún campo clave
+            archivos_filtrados = []
+            for archivo in archivos_exactos:
+                campos_concatenados = ' '.join([self._normalizar_texto(archivo.get(campo, "")) for campo in campos_clave])
+                if all(palabra in campos_concatenados for palabra in palabras_normalizadas):
+                    archivos_filtrados.append(archivo)
+            if archivos_filtrados:
+                print(f"[DEPURACIÓN] Búsqueda exacta (palabras normalizadas) encontró {len(archivos_filtrados)} archivos relevantes:")
+                for i, archivo in enumerate(archivos_filtrados, 1):
+                    print(f"  {i}. {archivo.get('fileName', 'Sin nombre')} | {archivo.get('filePath', 'N/A')} | Tipo: {archivo.get('artifactType', 'N/A')} | Dominio: {archivo.get('businessDomain', 'N/A')}")
+                contexto = self._preparar_contexto_semantico(archivos_filtrados)
+                prompt_llm = self.prompt_generator.generar_prompt(pregunta, contexto, campos)
+                print(f"\n[DEPURACIÓN] Prompt enviado al LLM (primeros 1000 caracteres, total {len(prompt_llm)}):\n")
+                print(prompt_llm[:1000] + ("..." if len(prompt_llm) > 1000 else ""))
+                respuesta_final = prompt_llm
+                log["respuesta_final"] = respuesta_final
+                log["estrategia_exitosa"] = "busqueda_exacta_palabras_normalizadas"
                 return log
             else:
-                prompt = f"No se encontró información relevante con la consulta anterior.\n\nPregunta original: \"{pregunta}\"\nConsulta anterior: {plan}\nResultado anterior: (vacío o irrelevante)\n\nDevuélveme SOLO un JSON plano, sin explicaciones, sin comentarios, sin bloques múltiples. Solo un JSON válido con:\n- campo_objetivo: el campo más relevante para buscar\n- filtro: si hay que buscar por nombre de archivo, path, etc. (ejemplo: {{\"fileName\": \"login.html\"}})\n- palabras_clave: si hay que buscar por keywords en el contenido\n- fallback: si no hay coincidencia, ¿qué hacer? (otro campo o estrategia)\n\nEsquema: {campos}"
-                log["intentos"].append(paso)
-                time.sleep(0.5)
-        log["respuesta_final"] = "NO ENCONTRÉ INFORMACIÓN"
-        return log 
+                print("[DEPURACIÓN] Búsqueda exacta no encontró archivos relevantes.")
+                log["respuesta_final"] = f"No se encontraron módulos o archivos relacionados con '{pregunta}' en el proyecto. Prueba con otro término o revisa los nombres/rutas de los archivos."
+                log["estrategia_exitosa"] = "ninguna"
+                return log
+
+    def _preparar_contexto_semantico(self, archivos_relevantes):
+        """
+        Prepara un contexto estructurado con los archivos encontrados por búsqueda semántica
+        """
+        contexto = "=== ARCHIVOS RELEVANTES ENCONTRADOS ===\n\n"
+        for archivo in archivos_relevantes:
+            contexto += f"Archivo: {archivo.get('fileName', 'Sin nombre')}\n"
+            contexto += f"Ruta: {archivo.get('filePath', 'N/A')}\n"
+            contexto += f"Tipo de artefacto: {archivo.get('artifactType', 'N/A')}\n"
+            contexto += f"Capa arquitectónica: {archivo.get('architecturalLayer', 'N/A')}\n"
+            contexto += f"Dominio de negocio: {archivo.get('businessDomain', 'N/A')}\n"
+            contexto += f"Responsabilidades: {', '.join(archivo.get('responsibilities', []))}\n"
+            contexto += f"Reglas de negocio: {', '.join([str(r) for r in archivo.get('businessRules', [])])}\n"
+            contexto += f"Conceptos de dominio: {', '.join(archivo.get('domainConcepts', []))}\n"
+            contexto += f"Propósito principal: {archivo.get('primaryPurpose', 'N/A')}\n"
+            contexto += f"Resumen IA: {archivo.get('aiGeneratedSummary', 'N/A')}\n"
+            contexto += f"Tags semánticos: {', '.join(archivo.get('semanticTags', []))}\n"
+            contexto += f"Framework detectado: {archivo.get('detectedFramework', 'N/A')}\n"
+            contexto += f"Dependencias externas: {', '.join(archivo.get('externalDependencies', []))}\n"
+            contexto += f"Última modificación: {archivo.get('lastModified', 'N/A')}\n"
+            contexto += f"---\n"
+        return contexto 
+
+    def _normalizar_texto(self, texto):
+        if texto is None:
+            return ""
+        if isinstance(texto, list):
+            texto = ' '.join([str(x) for x in texto])
+        elif not isinstance(texto, str):
+            texto = str(texto)
+        texto = texto.lower()
+        texto = ''.join((c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn'))
+        texto = texto.replace('-', ' ').replace('_', ' ')
+        texto = ''.join([c for c in texto if c.isalnum() or c.isspace()])
+        return texto.strip() 

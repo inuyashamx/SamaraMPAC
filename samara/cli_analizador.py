@@ -7,15 +7,54 @@ Uso: python cli_analizador.py <comando> [argumentos]
 import sys
 import argparse
 import json
+import os
+import psutil
 from pathlib import Path
 from code_analysis_agent import CodeAnalysisAgent
 
-def setup_agent():
-    """Inicializa el agente de análisis"""
+def detect_optimal_config():
+    """Detecta la configuración óptima basada en el hardware"""
+    cpu_count = os.cpu_count()
+    memory_gb = psutil.virtual_memory().total / (1024**3)
+    
+    # Detectar si es un Ryzen 9 (aproximado basado en cores)
+    if cpu_count >= 24:  # Ryzen 9 de alta gama (32 threads)
+        recommended_workers = min(28, int(cpu_count * 0.85))
+        recommended_ollama = min(8, max(4, cpu_count // 6))
+    elif cpu_count >= 16:  # Ryzen 9 estándar (24 threads) 
+        recommended_workers = min(22, int(cpu_count * 0.9))
+        recommended_ollama = min(6, max(4, cpu_count // 4))
+    elif cpu_count >= 12:  # Ryzen 7 o similar
+        recommended_workers = min(16, int(cpu_count * 0.8))
+        recommended_ollama = min(4, max(2, cpu_count // 4))
+    else:  # CPUs menores
+        recommended_workers = min(8, cpu_count)
+        recommended_ollama = 2
+    
+    # Ajustar según RAM disponible
+    if memory_gb < 16:
+        recommended_workers = max(4, recommended_workers // 2)
+        recommended_ollama = max(2, recommended_ollama // 2)
+    
+    return {
+        "cpu_count": cpu_count,
+        "memory_gb": round(memory_gb, 1),
+        "recommended_workers": recommended_workers,
+        "recommended_ollama": recommended_ollama,
+        "conservative_workers": max(4, recommended_workers - 4),
+        "aggressive_workers": min(32, recommended_workers + 4)
+    }
+
+def setup_agent(max_workers=None, ollama_max_concurrent=2, file_timeout=60, ollama_timeout=30):
+    """Inicializa el agente de análisis con configuración personalizable"""
     try:
         agent = CodeAnalysisAgent(
             ollama_url="http://localhost:11434",
-            weaviate_url="http://localhost:8080"
+            weaviate_url="http://localhost:8080",
+            max_workers=max_workers,
+            ollama_max_concurrent=ollama_max_concurrent,
+            file_timeout=file_timeout,
+            ollama_timeout=ollama_timeout
         )
         return agent
     except Exception as e:
@@ -24,7 +63,12 @@ def setup_agent():
 
 def cmd_analizar(args):
     """Comando: analizar e indexar un proyecto"""
-    agent = setup_agent()
+    agent = setup_agent(
+        max_workers=getattr(args, 'workers', None),
+        ollama_max_concurrent=getattr(args, 'ollama_concurrent', 2),
+        file_timeout=getattr(args, 'file_timeout', 60),
+        ollama_timeout=getattr(args, 'ollama_timeout', 30)
+    )
     if not agent:
         return
     
@@ -128,121 +172,61 @@ def cmd_listar(args):
                     print(f"      📁 {file_data.get('filePath', 'N/A')}")
                     print(f"      🔧 {file_data.get('technology', 'N/A')}")
 
-def cmd_generar(args):
-    """Comando: generar componente React"""
-    agent = setup_agent()
-    if not agent:
-        return
+def cmd_detectar(args):
+    """Comando: detectar configuración óptima del hardware"""
+    config = detect_optimal_config()
     
-    print(f"⚛️ Generando componente React para módulo: {args.modulo}")
-    print(f"📁 Proyecto: {args.project}")
-    
-    if args.requisitos:
-        print(f"📋 Requisitos adicionales: {args.requisitos}")
-    
-    result = agent.generate_react_component(
-        args.project, 
-        args.modulo, 
-        args.requisitos or ""
-    )
-    
-    print(f"\n📄 Componente React generado:")
+    print("🔍 **DETECCIÓN DE HARDWARE Y CONFIGURACIÓN ÓPTIMA**")
     print("=" * 60)
-    print(result)
-    print("=" * 60)
+    print(f"💻 CPU Threads detectados: {config['cpu_count']}")
+    print(f"🧠 RAM disponible: {config['memory_gb']} GB")
+    print()
     
-    # Guardar en archivo si se especifica
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(result)
-        
-        print(f"\n💾 Componente guardado en: {output_path}")
-
-def cmd_migrar(args):
-    """Comando: migrar módulo a nueva tecnología"""
-    agent = setup_agent()
-    if not agent:
-        return
-    
-    print(f"🚀 Migrando módulo '{args.modulo}' del proyecto '{args.project}' a {args.tecnologia}")
-    
-    if args.requisitos:
-        print(f"📋 Requisitos adicionales: {args.requisitos}")
-    
-    result = agent.migrate_module_to_technology(
-        args.project, 
-        args.modulo, 
-        args.tecnologia,
-        args.requisitos or ""
-    )
-    
-    if "error" in result:
-        print(f"❌ Error: {result['error']}")
-        if "suggestions" in result:
-            print("\n💡 Sugerencias:")
-            for suggestion in result["suggestions"]:
-                print(f"   • {suggestion}")
+    # Detectar tipo de procesador aproximado
+    if config['cpu_count'] >= 24:
+        cpu_type = "🚀 Ryzen 9 de alta gama (32 threads) o similar"
+    elif config['cpu_count'] >= 16:
+        cpu_type = "⚡ Ryzen 9 estándar (24 threads) o similar"
+    elif config['cpu_count'] >= 12:
+        cpu_type = "🔥 Ryzen 7 o similar"
     else:
-        print(f"\n✅ Migración completada:")
-        print(f"   📄 Módulo: {result['module_name']}")
-        print(f"   🔄 De: {result['original_technology']} → A: {result['target_technology']}")
-        print(f"   📊 Complejidad: {result['complexity']}")
-        print(f"   📁 Archivos analizados: {result['files_analyzed']}")
-        print(f"   🧩 Chunks analizados: {result['chunks_analyzed']}")
-        
-        print(f"\n📋 Análisis del módulo original:")
-        print(result.get('analysis_summary', 'No disponible'))
-        
-        print(f"\n📄 Código migrado:")
-        print("=" * 80)
-        print(result['migrated_code'])
-        print("=" * 80)
-        
-        print(f"\n📊 Reporte de migración:")
-        print(result.get('migration_report', 'No disponible'))
-        
-        if result.get('recommendations'):
-            print(f"\n💡 Recomendaciones:")
-            for rec in result['recommendations']:
-                print(f"   • {rec}")
-        
-        # Guardar en archivo si se especifica
-        if args.output:
-            output_path = Path(args.output)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Crear un reporte completo
-            full_report = f"""
-# Migración de {result['module_name']}
-
-## Información general
-- **Módulo original**: {result['module_name']}
-- **Tecnología original**: {result['original_technology']}
-- **Tecnología destino**: {result['target_technology']}
-- **Complejidad**: {result['complexity']}
-
-## Análisis del módulo original
-{result.get('analysis_summary', 'No disponible')}
-
-## Código migrado
-```{args.tecnologia.lower()}
-{result['migrated_code']}
-```
-
-## Reporte de migración
-{result.get('migration_report', 'No disponible')}
-
-## Recomendaciones
-{chr(10).join([f"- {rec}" for rec in result.get('recommendations', [])])}
-"""
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(full_report)
-            
-            print(f"\n💾 Reporte completo guardado en: {output_path}")
+        cpu_type = "💻 CPU estándar"
+    
+    print(f"🏷️  Tipo detectado: {cpu_type}")
+    print()
+    
+    print("📊 **CONFIGURACIONES RECOMENDADAS:**")
+    print()
+    
+    print(f"🟢 **CONSERVADORA** (empezar aquí):")
+    print(f"   --workers {config['conservative_workers']} --ollama_concurrent {max(2, config['recommended_ollama']-1)}")
+    print()
+    
+    print(f"🟡 **RECOMENDADA** (balance óptimo):")
+    print(f"   --workers {config['recommended_workers']} --ollama_concurrent {config['recommended_ollama']}")
+    print()
+    
+    print(f"🔴 **AGRESIVA** (máximo rendimiento):")
+    print(f"   --workers {config['aggressive_workers']} --ollama_concurrent {min(8, config['recommended_ollama']+1)}")
+    print()
+    
+    print("🔧 **COMANDOS LISTOS PARA USAR:**")
+    print()
+    print("# Configuración conservadora:")
+    print(f"python cli_analizador.py analizar /ruta/proyecto --workers {config['conservative_workers']} --ollama_concurrent {max(2, config['recommended_ollama']-1)}")
+    print()
+    print("# Configuración recomendada:")
+    print(f"python cli_analizador.py analizar /ruta/proyecto --workers {config['recommended_workers']} --ollama_concurrent {config['recommended_ollama']}")
+    print()
+    print("# Configuración agresiva:")
+    print(f"python cli_analizador.py analizar /ruta/proyecto --workers {config['aggressive_workers']} --ollama_concurrent {min(8, config['recommended_ollama']+1)}")
+    print()
+    
+    print("💡 **CONSEJOS:**")
+    print("   • Empieza con la configuración conservadora")
+    print("   • Si ves que tu CPU no está al 100%, prueba la recomendada")
+    print("   • Solo usa la agresiva si tienes suficiente RAM y refrigeración")
+    print("   • Monitorea la temperatura de tu CPU durante el procesamiento")
 
 def cmd_eliminar(args):
     """Comando: eliminar datos del proyecto"""
@@ -261,6 +245,23 @@ def cmd_eliminar(args):
     else:
         print(f"❌ Error eliminando datos del proyecto '{args.project}'")
 
+def cmd_verificar_indexado(args):
+    """Comando: verificar archivos/módulos realmente indexados en el proyecto"""
+    agent = setup_agent()
+    if not agent:
+        return
+    print(f"🔍 Verificando archivos indexados en el proyecto: {args.project}")
+    result = agent.list_project_modules(args.project)
+    if "error" in result:
+        print(f"❌ Error: {result['error']}")
+    else:
+        mods = result.get('all_modules', [])
+        print(f"\n📦 Total módulos indexados: {len(mods)}\n")
+        for i, mod in enumerate(mods, 1):
+            print(f"{i}. {mod.get('fileName', 'Sin nombre')} | {mod.get('filePath', 'N/A')} | Tipo: {mod.get('artifactType', 'N/A')} | Dominio: {mod.get('businessDomain', 'N/A')}")
+        if not mods:
+            print("No se encontraron módulos indexados en el proyecto.")
+
 def main():
     parser = argparse.ArgumentParser(
         description="Analizador de código con Weaviate",
@@ -268,8 +269,17 @@ def main():
         epilog="""
 Ejemplos de uso:
 
-  # Analizar un proyecto
+  # ¡NUEVO! Detectar configuración óptima para tu hardware
+  python cli_analizador.py detectar
+
+  # Analizar un proyecto (configuración por defecto)
   python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp
+
+  # Analizar con configuración personalizada de multihilos
+  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --workers 8 --ollama_concurrent 4
+
+  # Analizar con timeouts personalizados
+  python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --file_timeout 120 --ollama_timeout 60
 
   # Analizar con logs detallados (archivos ignorados y chunks)
   python cli_analizador.py analizar C:/MisProyectos/Polymer/MiApp --name MiApp --verbose
@@ -283,14 +293,14 @@ Ejemplos de uso:
   # Listar módulos
   python cli_analizador.py listar MiApp
 
-  # Generar componente React
-  python cli_analizador.py generar MiApp login --requisitos "con hooks y validación"
-
-  # Migrar módulo a nueva tecnología
-  python cli_analizador.py migrar MiApp login react --requisitos "con hooks y validación"
-
   # Eliminar proyecto
   python cli_analizador.py eliminar MiApp
+
+Opciones de multihilos:
+  --workers N              : Número de threads para procesar archivos (default: min(16, CPU_count))
+  --ollama_concurrent N    : Conexiones simultáneas a Ollama (default: 2)
+  --file_timeout N         : Timeout en segundos por archivo (default: 60)
+  --ollama_timeout N       : Timeout en segundos para Ollama (default: 30)
         """
     )
     
@@ -302,6 +312,10 @@ Ejemplos de uso:
     parser_analizar.add_argument('--name', help='Nombre del proyecto (opcional)')
     parser_analizar.add_argument('--verbose', '-v', action='store_true', help='Mostrar información detallada y logs de archivos procesados')
     parser_analizar.add_argument('--logfile', action='store_true', help='Generar archivos de log en directorio "logs" (borra logs anteriores)')
+    parser_analizar.add_argument('--workers', type=int, help='Número máximo de trabajadores')
+    parser_analizar.add_argument('--ollama_concurrent', type=int, help='Número máximo de conexiones concurrentes con Ollama')
+    parser_analizar.add_argument('--file_timeout', type=int, help='Tiempo de espera para archivos')
+    parser_analizar.add_argument('--ollama_timeout', type=int, help='Tiempo de espera para Ollama')
     parser_analizar.set_defaults(func=cmd_analizar)
     
     # Comando: consultar
@@ -319,28 +333,20 @@ Ejemplos de uso:
     parser_listar.add_argument('--verbose', '-v', action='store_true', help='Mostrar información detallada')
     parser_listar.set_defaults(func=cmd_listar)
     
-    # Comando: generar
-    parser_generar = subparsers.add_parser('generar', help='Generar componente React')
-    parser_generar.add_argument('project', help='Nombre del proyecto')
-    parser_generar.add_argument('modulo', help='Nombre del módulo a convertir')
-    parser_generar.add_argument('--requisitos', help='Requisitos adicionales')
-    parser_generar.add_argument('--output', '-o', help='Archivo de salida para guardar el componente')
-    parser_generar.set_defaults(func=cmd_generar)
-    
-    # Comando: migrar
-    parser_migrar = subparsers.add_parser('migrar', help='Migrar módulo a nueva tecnología')
-    parser_migrar.add_argument('project', help='Nombre del proyecto')
-    parser_migrar.add_argument('modulo', help='Nombre del módulo a migrar')
-    parser_migrar.add_argument('tecnologia', choices=['react', 'vue', 'angular', 'svelte'], help='Tecnología destino')
-    parser_migrar.add_argument('--requisitos', help='Requisitos adicionales')
-    parser_migrar.add_argument('--output', '-o', help='Archivo de salida para guardar el reporte completo')
-    parser_migrar.set_defaults(func=cmd_migrar)
+    # Comando: detectar
+    parser_detectar = subparsers.add_parser('detectar', help='Detectar configuración óptima del hardware')
+    parser_detectar.set_defaults(func=cmd_detectar)
     
     # Comando: eliminar
     parser_eliminar = subparsers.add_parser('eliminar', help='Eliminar datos del proyecto')
     parser_eliminar.add_argument('project', help='Nombre del proyecto')
     parser_eliminar.add_argument('--confirmar', '-y', action='store_true', help='Confirmar sin preguntar')
     parser_eliminar.set_defaults(func=cmd_eliminar)
+    
+    # Comando: verificar_indexado
+    parser_verificar = subparsers.add_parser('verificar_indexado', help='Verificar archivos/módulos realmente indexados en el proyecto')
+    parser_verificar.add_argument('project', help='Nombre del proyecto')
+    parser_verificar.set_defaults(func=cmd_verificar_indexado)
     
     args = parser.parse_args()
     
